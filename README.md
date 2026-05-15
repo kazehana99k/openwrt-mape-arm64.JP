@@ -1,170 +1,171 @@
-<sub>**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)</sub>
+<sub>[English](README.en.md) · [简体中文](README.zh-CN.md) · **日本語**</sub>
 
 # openwrt-mape-arm64
 
-A working MAP-E client for arm64 OpenWrt / QWrt routers behind Japanese
-ISPs (BIGLOBE IPv6オプション, JPNE v6plus, OCN バーチャルコネクト, etc.).
-Replaces the broken built-in implementation in QSDK / QWrt.
+日本の ISP（BIGLOBE IPv6オプション、JPNE v6plus、OCN バーチャルコネクト 等）
+配下にある arm64 OpenWrt / QWrt ルーターのための、動作する MAP-E
+クライアント。QSDK / QWrt 内蔵の壊れた実装を置き換えます。
 
-> **Architecture**: developed and tested on aarch64 (IPQ95xx, QWrt 25.12),
-> but the package is pure shell + awk + iptables and runs on any
-> architecture supported by OpenWrt.
+> **対応アーキテクチャ**：aarch64（IPQ95xx、QWrt 25.12）で開発・検証
+> 済みですが、本パッケージは純粋に shell + awk + iptables のため、
+> OpenWrt が対応する任意のアーキテクチャで動作します。
 
-## Why this exists
+## なぜ存在するのか
 
-QSDK / QWrt's built-in MAP-E (`proto='none' type='map-e'` on the wan
-interface) has bugs that prevent the tunnel from establishing or fw3
-from recognizing it. This package replaces it with a working
-implementation that:
+QSDK / QWrt 内蔵の MAP-E（wan インターフェースに `proto='none'
+type='map-e'` を設定するもの）にはバグがあり、トンネルが確立されない
+か、fw3 がインターフェースを認識しないという症状が出ます。本パッケージ
+はこれを動作する実装で置き換えます：
 
-- **Auto-detects the ISP** from your IPv6 PD (690 rules from fc2
-  calculator covering BIGLOBE / JPNE v6plus / OCN; other ISPs via
-  manual mode)
-- **Builds the ipip6 tunnel as a proper netifd interface** —
-  `ifup mape` / `ifdown mape`, full integration with OpenWrt's
-  network stack
-- **Generates SNAT rules with conditional probabilities** covering
-  100 % of the assigned PSID port range (no leaked ephemeral ports
-  that the BR drops)
-- **UCI-configured port forwarding** with PSID-range validation
-- **LuCI integration** — protocol shows up in Network → Interfaces
-  with a configuration form and an "Auto-detected parameters" preview
-- **Pure iptables**, no nftables required; compatible with fw3
+- **ISP を自動判定** —— あなたの IPv6 PD から fc2 計算機の 690 個の
+  ルール（BIGLOBE / JPNE v6plus / OCN をカバー）でマッチング。その他の
+  ISP は手動モードで設定可能
+- **netifd の正規プロトコルとして ipip6 トンネルを構築** ——
+  `ifup mape` / `ifdown mape` で OpenWrt のネットワークスタックと完全に
+  統合
+- **条件付き確率による SNAT ルール** —— 割り当てられた PSID ポート範囲を
+  100 % カバーします（ランダムな送信元ポートが BR で破棄されることが
+  ありません）
+- **UCI で設定するポートフォワード** —— src_port が PSID 範囲内かを
+  自動検証
+- **LuCI 統合** —— ネットワーク → インターフェース 一覧にプロトコル
+  「MAP-E (custom)」として表示され、編集ページでは設定フォームと
+  「自動検出されたパラメーター」プレビューパネルが利用可能
+- **iptables のみ**で動作、nftables は不要、fw3 と互換
 
-## Screenshots
+## スクリーンショット
 
-LuCI Network → Interfaces — `mape` shows up as a first-class interface
-with the protocol `MAP-E (custom)`:
+LuCI ネットワーク → インターフェース —— `mape` がプロトコル
+`MAP-E (custom)` の正規インターフェースとして表示されます：
 
-![LuCI interfaces list](docs/images/luci-interfaces.jpg)
+![LuCI インターフェース一覧](docs/images/luci-interfaces.jpg)
 
-Edit page with auto-detected parameters preview:
+編集画面に「自動検出されたパラメーター」プレビューパネル：
 
-![LuCI edit page](docs/images/luci-edit.jpg)
+![LuCI 編集画面](docs/images/luci-edit.jpg)
 
-## Quick install (one-line, recommended)
+## ワンクリックインストール（推奨）
 
-ssh into your router as root, then run:
+ルーターに root で ssh して、次のコマンドを実行：
 
 ```sh
 wget -O - https://github.com/kazehana99k/openwrt-mape-arm64.JP/releases/latest/download/install.sh | sh
 ```
 
-The installer will:
+このインストーラーは：
 
-1. Verify you're on OpenWrt / QWrt
-2. `opkg install` the prerequisites (ip-full, iptables, kmod-ip6-tunnel, jsonfilter, …)
-3. Download and extract the latest release tarball into `/`
-4. Set executable permissions, apply sysctl tuning, reload rpcd
-5. Print next steps (restart netifd, configure interface)
+1. OpenWrt / QWrt 上で動作していることを確認
+2. 前提パッケージ（ip-full、iptables、kmod-ip6-tunnel、jsonfilter 等）を `opkg install`
+3. 最新リリースの tarball をダウンロードして `/` に展開
+4. 実行権限を設定、sysctl チューニングを適用、rpcd を再読込
+5. 次のステップを表示（netifd を再起動、インターフェースを設定）
 
-After installation, run `/etc/init.d/network restart` to register the
-new `mape` protocol with netifd, then configure via LuCI or CLI (see
-below).
+インストール完了後、`/etc/init.d/network restart` で `mape` プロトコルを
+netifd に登録してから、LuCI または CLI で設定してください（下記参照）。
 
-> Prefer to inspect the script first?
-> `wget` then `less install.sh` then `sh install.sh`.
+> スクリプトを先に確認したい場合：
+> `wget` でダウンロード → `less install.sh` で確認 → `sh install.sh`
 
-## Manual install (from source)
+## 手動インストール（ソースから）
 
-### Prerequisites
+### 前提パッケージ
 
 ```sh
 opkg install ip-full iptables iptables-mod-conntrack-extra \
              kmod-ip6-tunnel kmod-iptunnel6 jsonfilter
 ```
 
-### Deploy
+### デプロイ
 
 ```sh
 git clone https://github.com/kazehana99k/openwrt-mape-arm64.JP.git
 cd openwrt-mape-arm64.JP
 
-# Push package files into / preserving paths
-tar -C package/mape/files -cf - . | ssh root@<router-ip> "cd / && tar -xf -"
+# tar パイプでパッケージファイルを / にプッシュ（パス構造を保持）
+tar -C package/mape/files -cf - . | ssh root@<ルーターIP> "cd / && tar -xf -"
 
-# Permissions + reload services
-ssh root@<router-ip> '
+# 権限設定 + サービス再読込
+ssh root@<ルーターIP> '
     chmod +x /lib/netifd/proto/mape.sh \
              /usr/bin/mape-calc \
              /etc/init.d/mape-fw \
              /etc/hotplug.d/iface/40-mape
     sysctl -p /etc/sysctl.d/99-mape.conf
     /etc/init.d/rpcd reload
-    /etc/init.d/network restart   # netifd needs restart to register the new proto
+    /etc/init.d/network restart   # netifd は新しい proto を登録するために再起動が必要
 '
 ```
 
-## Configuration
+## 設定
 
-### Option A — LuCI (recommended)
+### 方法 A —— LuCI（推奨）
 
-1. Open **Network → Interfaces → Add new interface**
-2. Name: `mape`, Protocol: `MAP-E (custom)`
-3. Fill the **IPv6 PD prefix** field (e.g. `2404:7a80:0:0::/56`),
-   set **Physical WAN device** to your IPv6 upstream interface
-   (e.g. `eth4`)
-4. **Save & Apply**
-5. Re-edit the interface to see the **Auto-detected parameters**
-   panel (ISP, CE IPv6, IPv4, BR, PSID)
+1. **ネットワーク → インターフェース → 新しいインターフェースを追加**
+2. 名前：`mape`、プロトコル：`MAP-E (custom)`
+3. **IPv6 PD prefix** 欄に PD を入力（例：`2404:7a80:0:0::/56`）、
+   **Physical WAN device** に IPv6 上流インターフェース(例：`eth4`)
+   を入力
+4. **保存して適用**
+5. インターフェースを再度編集すると **自動検出されたパラメーター**
+   パネルで ISP / CE IPv6 / IPv4 / BR / PSID が確認できます
 
-For port forwarding: copy `examples/mape.example` to `/etc/config/mape`
-and edit (must use `src_port` values inside the PSID-allocated range).
+ポートフォワード設定：`examples/mape.example` を `/etc/config/mape` に
+コピーして編集してください（src_port は必ず PSID 割当範囲内の値に）。
 
-### Option B — CLI / UCI
+### 方法 B —— CLI / UCI
 
 ```sh
-# 1. Clean QSDK MAP-E orphan fields (if migrating)
+# 1. QSDK MAP-E の残骸フィールドを削除（旧設定からの移行時）
 for f in type peeraddr ipaddr ip4prefixlen ip6prefix ip6prefixlen \
          ealen psidlen offset tunlink; do
     uci delete network.wan.$f 2>/dev/null
 done
 uci commit network
 
-# 2. Define mape interface
+# 2. mape インターフェースを定義
 uci set network.mape=interface
 uci set network.mape.proto=mape
-uci set network.mape.pd_prefix='YOUR_PD_HERE'
+uci set network.mape.pd_prefix='あなたの PD'
 uci set network.mape.wan_dev='eth4'
 uci set network.mape.mtu='1460'
 uci set network.mape.legacy_mssfix='1'
 uci commit network
 
-# Alternative: option tunlink 'wan6' to auto-fetch PD from upstream
+# 別案：option tunlink 'wan6'  上流インターフェースから PD を自動取得
 
-# 3. Bring it up
+# 3. 起動
 ifup mape
 sleep 2
 ip route show default                          # default dev mape
-ip addr show mape | grep inet                  # IPv4 from MAP-E
-cat /var/run/mape.mape.json                    # parameter snapshot
-ping -c 3 -I mape 1.1.1.1                      # connectivity check
+ip addr show mape | grep inet                  # MAP-E 割当の IPv4
+cat /var/run/mape.mape.json                    # パラメータースナップショット
+ping -c 3 -I mape 1.1.1.1                      # 接続性確認
 ```
 
-## CLI quick reference
+## CLI クイックリファレンス
 
 ```sh
-# Compute MAP-E parameters for any PD
+# 任意の PD に対して MAP-E パラメーターを計算
 mape-calc compute 2404:7a80:0:0::/56
 
-# Verify a port is in your PSID range before adding a forward
+# ポート転送を追加する前に、ポートが PSID 範囲内かを検証
 mape-calc check-port 4096 2404:7a80:0:0::/56
 
-# List all available port sets
+# 利用可能なすべてのポートセットをリスト
 mape-calc port-sets 2404:7a80:0:0::/56
 
-# List supported ISP rules
+# サポートされている ISP ルールをリスト
 mape-calc list-rules
 ```
 
-## Manual mode (Asahi Net, transix, So-net, …)
+## 手動モード（Asahi Net、transix、So-net 等）
 
-If your ISP isn't in the rule database, use manual mode (provide all
-RFC 7597 parameters yourself):
+ISP がルールデータベースに含まれていない場合は手動モードを使用してください
+（RFC 7597 パラメーターを自分で指定）：
 
 ```sh
-uci set network.mape.peeraddr='YOUR_BR_ADDRESS'    # from ISP docs
-uci set network.mape.ip6prefix='YOUR_V6_PREFIX'    # e.g. '2001:db8::'
+uci set network.mape.peeraddr='あなたの BR アドレス'  # ISP 文書から
+uci set network.mape.ip6prefix='あなたの V6 prefix'   # 例：'2001:db8::'
 uci set network.mape.ip6prefixlen='38'
 uci set network.mape.ipaddr='1.2.3.0'
 uci set network.mape.ip4prefixlen='22'
@@ -174,37 +175,38 @@ uci set network.mape.offset='4'
 uci commit network
 ```
 
-## Verifying it works
+## 動作確認
 
 ```sh
-ip -6 tunnel show mape           # shows local/remote/dev
-ip addr show mape | grep inet    # IPv4 bound to mape
+ip -6 tunnel show mape           # local/remote/dev を表示
+ip addr show mape | grep inet    # mape に IPv4 がバインドされているか
 ip route show default            # default dev mape
-cat /var/run/mape.mape.json      # parameter snapshot
-logread -e mape | tail -20       # recent log entries
-iptables -t nat -L POSTROUTING -n | grep -c "to:"    # ~25 SNAT rules
+cat /var/run/mape.mape.json      # パラメータースナップショット
+logread -e mape | tail -20       # 最近のログ
+iptables -t nat -L POSTROUTING -n | grep -c "to:"   # 約 25 個の SNAT ルール
 ```
 
-From a LAN client: open https://www.google.com — should work.
+LAN クライアントから https://www.google.co.jp を開けば確認完了。
 
-## Troubleshooting
+## トラブルシューティング
 
-| Symptom | Likely cause | Fix |
+| 症状 | 原因 | 対処 |
 |---|---|---|
-| `ifup mape` silently does nothing | netifd hasn't picked up the new proto | `/etc/init.d/network restart` |
-| `LuCI: unsupported protocol type` | proto JS file missing or in wrong dir | Verify `/www/luci-static/resources/protocol/mape.js` exists; force-refresh browser |
-| `Auto-detected parameters: not detected` | rpcd ACL not loaded | `/etc/init.d/rpcd reload`, then refresh browser |
-| `Cannot find device "mape"` repeating in logread | setup is failing silently | `logread -e mape` will show the actual stage that failed |
-| Internet works but TCP connections fail randomly | SNAT port-pool miss (old version had this bug) | Update to v0.1.0+ which uses conditional probabilities |
+| `ifup mape` が黙って何も起こらない | netifd が新 proto を認識していない | `/etc/init.d/network restart` |
+| LuCI に「サポートされていないプロトコルタイプ」と表示 | proto JS ファイルの欠落またはパス誤り | `/www/luci-static/resources/protocol/mape.js` の存在を確認；ブラウザで強制リロード |
+| 「自動検出されたパラメーター：未検出」 | rpcd の ACL が読み込まれていない | `/etc/init.d/rpcd reload` の後、ブラウザでリロード |
+| logread に `Cannot find device "mape"` が繰り返し出る | setup が静かに失敗している | `logread -e mape` で実際のエラー段階を確認 |
+| インターネットは繋がるが TCP 接続が時々失敗 | SNAT ポートプール漏れ（旧バージョンのバグ） | v0.1.0+ にアップデート（条件付き確率で修正済み） |
 
-## Limitations
+## 制限事項
 
-- ISP database covers BIGLOBE (A & B) / JPNE v6plus / OCN. Asahi Net,
-  transix, So-net, etc. need manual mode (or contribute a rule via PR)
-- No IPK packaging yet — install is `cp` based
-- No GUI for editing port forwards (use LuCI Network → "MAP-E" or
-  edit `/etc/config/mape` by hand)
+- ISP データベースは BIGLOBE（A & B）/ JPNE v6plus / OCN をカバー。
+  Asahi Net、transix、So-net 等は手動モードが必要（または PR でルールを
+  追加してください）
+- IPK パッケージはまだ未提供 —— インストールは `cp` ベース
+- ポートフォワード編集用の独立 GUI なし（LuCI ネットワーク → 「MAP-E」
+  を使用、または `/etc/config/mape` を直接編集）
 
-## License
+## ライセンス
 
-MIT — see `LICENSE`.
+MIT —— `LICENSE` を参照。

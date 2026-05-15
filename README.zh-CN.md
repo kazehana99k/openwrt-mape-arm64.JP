@@ -1,4 +1,4 @@
-<sub>[English](README.md) · **简体中文** · [日本語](README.ja.md)</sub>
+<sub>[English](README.en.md) · **简体中文** · [日本語](README.md)</sub>
 
 # openwrt-mape-arm64
 
