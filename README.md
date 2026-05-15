@@ -1,127 +1,111 @@
-# openwrt-map-e
+<sub>**English** · [简体中文](README.zh-CN.md) · [日本語](README.ja.md)</sub>
 
-A clean-room MAP-E client for OpenWrt / QWrt routers behind Japanese ISPs
-(BIGLOBE IPv6オプション, JPNE v6plus, OCN バーチャルコネクト, etc.).
+# openwrt-mape-arm64
+
+A working MAP-E client for arm64 OpenWrt / QWrt routers behind Japanese
+ISPs (BIGLOBE IPv6オプション, JPNE v6plus, OCN バーチャルコネクト, etc.).
+Replaces the broken built-in implementation in QSDK / QWrt.
+
+> **Architecture**: developed and tested on aarch64 (IPQ95xx, QWrt 25.12),
+> but the package is pure shell + awk + iptables and runs on any
+> architecture supported by OpenWrt.
 
 ## Why this exists
 
-QSDK / QWrt's built-in MAP-E (`proto='none' type='map-e'`) has bugs that
-prevent the tunnel from establishing or fw3 from recognizing it. This
-package replaces it with a working implementation that:
+QSDK / QWrt's built-in MAP-E (`proto='none' type='map-e'` on the wan
+interface) has bugs that prevent the tunnel from establishing or fw3
+from recognizing it. This package replaces it with a working
+implementation that:
 
-- Auto-detects the ISP from your IPv6 prefix delegation (BIGLOBE / JPNE / OCN
-  via embedded fc2.com rule database; other ISPs via manual mode)
-- Builds the `ipip6` tunnel as a proper netifd interface (`ifup mape`,
-  `ifdown mape`)
-- Generates SNAT rules covering the assigned PSID port range
-- Exposes UCI-configured port forwarding with PSID-range validation
-- Pure iptables (no nftables required); compatible with fw3
+- **Auto-detects the ISP** from your IPv6 PD (690 rules from fc2
+  calculator covering BIGLOBE / JPNE v6plus / OCN; other ISPs via
+  manual mode)
+- **Builds the ipip6 tunnel as a proper netifd interface** —
+  `ifup mape` / `ifdown mape`, full integration with OpenWrt's
+  network stack
+- **Generates SNAT rules with conditional probabilities** covering
+  100 % of the assigned PSID port range (no leaked ephemeral ports
+  that the BR drops)
+- **UCI-configured port forwarding** with PSID-range validation
+- **LuCI integration** — protocol shows up in Network → Interfaces
+  with a configuration form and an "Auto-detected parameters" preview
+- **Pure iptables**, no nftables required; compatible with fw3
 
-## Installation
-
-This is the **backend** package. LuCI integration is a separate package
-(see Plan B). For now, configure via CLI/UCI.
+## Quick install (arm64 / generic)
 
 ### Prerequisites
 
-```
+```sh
 opkg install ip-full iptables iptables-mod-conntrack-extra \
              kmod-ip6-tunnel kmod-iptunnel6 jsonfilter
 ```
 
-### Files to deploy
-
-```
-mkdir -p /usr/share/mape /usr/bin /lib/netifd/proto \
-         /etc/init.d /etc/hotplug.d/iface /etc/config /etc/sysctl.d
-cp package/mape/files/usr/bin/mape-calc                    /usr/bin/
-cp package/mape/files/usr/share/mape/calc.awk              /usr/share/mape/
-cp package/mape/files/usr/share/mape/rules.json            /usr/share/mape/
-cp package/mape/files/lib/netifd/proto/mape.sh             /lib/netifd/proto/
-cp package/mape/files/etc/init.d/mape-fw                   /etc/init.d/
-cp package/mape/files/etc/hotplug.d/iface/40-mape          /etc/hotplug.d/iface/
-cp package/mape/files/etc/sysctl.d/99-mape.conf            /etc/sysctl.d/
-chmod +x /usr/bin/mape-calc /etc/init.d/mape-fw /etc/hotplug.d/iface/40-mape
-sysctl -p /etc/sysctl.d/99-mape.conf
-```
-
-(Plan C will provide an IPK so all of this becomes `opkg install mape_*.ipk`.)
-
-## Migrating from the standalone mape.sh
-
-If you currently run a hand-written `mape.sh`:
-
-### 1. Stop the script
-
-Remove the call from `/etc/rc.local` or wherever you launch it. Don't run
-`mape.sh` after the new package is in place.
-
-### 2. Clean orphan UCI from QWrt's broken built-in MAP-E
-
-Your `/etc/config/network` likely contains residue from the disabled
-QSDK MAP-E (`type='map-e'`, `peeraddr`, `ipaddr`, `ealen`, etc. on the
-`wan` section). Remove them:
+### Deploy
 
 ```sh
+git clone https://github.com/kazehana99k/openwrt-mape-arm64.JP.git
+cd openwrt-mape-arm64.JP
+
+# Push package files into / preserving paths
+tar -C package/mape/files -cf - . | ssh root@<router-ip> "cd / && tar -xf -"
+
+# Permissions + reload services
+ssh root@<router-ip> '
+    chmod +x /lib/netifd/proto/mape.sh \
+             /usr/bin/mape-calc \
+             /etc/init.d/mape-fw \
+             /etc/hotplug.d/iface/40-mape
+    sysctl -p /etc/sysctl.d/99-mape.conf
+    /etc/init.d/rpcd reload
+    /etc/init.d/network restart   # netifd needs restart to register the new proto
+'
+```
+
+## Configuration
+
+### Option A — LuCI (recommended)
+
+1. Open **Network → Interfaces → Add new interface**
+2. Name: `mape`, Protocol: `MAP-E (custom)`
+3. Fill the **IPv6 PD prefix** field (e.g. `2404:7a80:0:0::/56`),
+   set **Physical WAN device** to your IPv6 upstream interface
+   (e.g. `eth4`)
+4. **Save & Apply**
+5. Re-edit the interface to see the **Auto-detected parameters**
+   panel (ISP, CE IPv6, IPv4, BR, PSID)
+
+For port forwarding: copy `examples/mape.example` to `/etc/config/mape`
+and edit (must use `src_port` values inside the PSID-allocated range).
+
+### Option B — CLI / UCI
+
+```sh
+# 1. Clean QSDK MAP-E orphan fields (if migrating)
 for f in type peeraddr ipaddr ip4prefixlen ip6prefix ip6prefixlen \
          ealen psidlen offset tunlink; do
     uci delete network.wan.$f 2>/dev/null
 done
 uci commit network
-```
 
-### 3. Define the mape interface
-
-```sh
+# 2. Define mape interface
 uci set network.mape=interface
 uci set network.mape.proto=mape
-uci set network.mape.pd_prefix='2404:7a80:0:0::/56'    # ← your PD
-uci set network.mape.wan_dev='eth4'                           # ← your physical WAN
+uci set network.mape.pd_prefix='YOUR_PD_HERE'
+uci set network.mape.wan_dev='eth4'
 uci set network.mape.mtu='1460'
 uci set network.mape.legacy_mssfix='1'
 uci commit network
-```
 
-(Alternative: `option tunlink 'wan6'` instead of `pd_prefix` to read PD
-automatically from your IPv6 upstream.)
+# Alternative: option tunlink 'wan6' to auto-fetch PD from upstream
 
-### 4. Migrate port forwarding
-
-Translate each `iptables -t nat -A PREROUTING ... DNAT` from your
-mape.sh into a UCI section:
-
-```sh
-uci set mape.web=forward
-uci set mape.web.iface='mape'
-uci set mape.web.proto='tcp'
-uci set mape.web.src_port='4096'
-uci set mape.web.dest_ip='192.168.1.10'
-uci set mape.web.dest_port='80'
-# ... repeat per rule ...
-uci commit mape
-```
-
-A ready-made example is in `examples/mape.example` — copy it as a starting template:
-
-```sh
-cp examples/mape.example /etc/config/mape
-```
-
-### 5. Bring it up
-
-```sh
+# 3. Bring it up
 ifup mape
 sleep 2
-ip route show default                            # should: default dev mape
-iptables -t nat -L POSTROUTING -n -v | head -5   # should: 30 SNAT rules
-iptables -t nat -L PREROUTING -n -v | head      # should: your DNATs
-ping -c 3 -I mape 1.1.1.1                       # connectivity check
+ip route show default                          # default dev mape
+ip addr show mape | grep inet                  # IPv4 from MAP-E
+cat /var/run/mape.mape.json                    # parameter snapshot
+ping -c 3 -I mape 1.1.1.1                      # connectivity check
 ```
-
-### 6. Persist on boot
-
-netifd handles this automatically — `mape` will come up at boot if
-defined in `/etc/config/network`.
 
 ## CLI quick reference
 
@@ -139,39 +123,53 @@ mape-calc port-sets 2404:7a80:0:0::/56
 mape-calc list-rules
 ```
 
-## Verifying it's working
-
-```sh
-cat /var/run/mape.mape.json     # parameter snapshot
-ip -s -6 tunnel show mape       # tunnel stats
-logread -t 100 | grep mape      # recent log entries
-```
-
 ## Manual mode (Asahi Net, transix, So-net, …)
 
-If your ISP isn't in the rule database, use manual mode:
+If your ISP isn't in the rule database, use manual mode (provide all
+RFC 7597 parameters yourself):
 
 ```sh
-uci set network.mape=interface
-uci set network.mape.proto=mape
-uci set network.mape.pd_prefix='YOUR PD'
-uci set network.mape.peeraddr='YOUR BR ADDRESS'      # from ISP docs
-uci set network.mape.ip6prefix='YOUR V6 PREFIX'      # e.g. '2001:db8::'
+uci set network.mape.peeraddr='YOUR_BR_ADDRESS'    # from ISP docs
+uci set network.mape.ip6prefix='YOUR_V6_PREFIX'    # e.g. '2001:db8::'
 uci set network.mape.ip6prefixlen='38'
 uci set network.mape.ipaddr='1.2.3.0'
 uci set network.mape.ip4prefixlen='22'
 uci set network.mape.ealen='18'
 uci set network.mape.psidlen='8'
 uci set network.mape.offset='4'
-uci set network.mape.wan_dev='eth4'
 uci commit network
 ```
 
-## Limitations (v0.1)
+## Verifying it works
 
-- ISP database covers BIGLOBE / JPNE v6plus / OCN. Others need manual mode.
-- No LuCI GUI yet (Plan B).
-- No IPK (Plan C).
+```sh
+ip -6 tunnel show mape           # shows local/remote/dev
+ip addr show mape | grep inet    # IPv4 bound to mape
+ip route show default            # default dev mape
+cat /var/run/mape.mape.json      # parameter snapshot
+logread -e mape | tail -20       # recent log entries
+iptables -t nat -L POSTROUTING -n | grep -c "to:"    # ~25 SNAT rules
+```
+
+From a LAN client: open https://www.google.com — should work.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `ifup mape` silently does nothing | netifd hasn't picked up the new proto | `/etc/init.d/network restart` |
+| `LuCI: unsupported protocol type` | proto JS file missing or in wrong dir | Verify `/www/luci-static/resources/protocol/mape.js` exists; force-refresh browser |
+| `Auto-detected parameters: not detected` | rpcd ACL not loaded | `/etc/init.d/rpcd reload`, then refresh browser |
+| `Cannot find device "mape"` repeating in logread | setup is failing silently | `logread -e mape` will show the actual stage that failed |
+| Internet works but TCP connections fail randomly | SNAT port-pool miss (old version had this bug) | Update to v0.1.0+ which uses conditional probabilities |
+
+## Limitations
+
+- ISP database covers BIGLOBE (A & B) / JPNE v6plus / OCN. Asahi Net,
+  transix, So-net, etc. need manual mode (or contribute a rule via PR)
+- No IPK packaging yet — install is `cp` based
+- No GUI for editing port forwards (use LuCI Network → "MAP-E" or
+  edit `/etc/config/mape` by hand)
 
 ## License
 

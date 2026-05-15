@@ -1,124 +1,110 @@
-# openwrt-map-e
+<sub>[English](README.md) · **简体中文** · [日本語](README.ja.md)</sub>
 
-针对日本 ISP（BIGLOBE IPv6オプション、JPNE v6plus、OCN バーチャルコネクト 等）
-的 OpenWrt / QWrt 路由器 MAP-E 客户端。
+# openwrt-mape-arm64
+
+为 arm64 OpenWrt / QWrt 路由器提供能用的 MAP-E 客户端，目标日本 ISP
+（BIGLOBE IPv6オプション、JPNE v6plus、OCN バーチャルコネクト 等）。
+替代 QSDK / QWrt 自带的有 bug 的实现。
+
+> **架构说明**：在 aarch64（IPQ95xx，QWrt 25.12）上开发和测试，但本包是
+> 纯 shell + awk + iptables，理论上可以在 OpenWrt 支持的任何架构上跑。
 
 ## 为什么有这个项目
 
-QSDK / QWrt 自带的 MAP-E（`proto='none' type='map-e'`）有 bug，导致隧道无法建立
-或 fw3 无法识别。本包提供一个能工作的替代实现：
+QSDK / QWrt 自带的 MAP-E（在 wan 接口上配 `proto='none' type='map-e'`）
+有 bug，要么隧道建不起来，要么 fw3 识别不到接口。本包提供一个能跑的
+替代实现：
 
-- 根据你的 IPv6 PD 自动识别 ISP（BIGLOBE / JPNE / OCN，规则库内嵌；其他 ISP 走
-  手动模式）
-- 通过 netifd 建立 `ipip6` 隧道（一等公民接口，`ifup mape` / `ifdown mape`）
-- 自动生成符合分配的 PSID 端口段的 SNAT 规则
-- UCI 配置的端口转发，自动校验端口是否在 PSID 段内
-- 纯 iptables（不依赖 nftables）；兼容 fw3
+- **自动识别 ISP**（基于你的 IPv6 PD），内嵌 fc2 计算器的 690 条规则，
+  覆盖 BIGLOBE / JPNE v6plus / OCN，其他 ISP 走手动模式
+- **通过 netifd 建立 ipip6 隧道** —— `ifup mape` / `ifdown mape`，跟
+  OpenWrt 网络栈完全集成
+- **SNAT 用条件概率分布**，100 % 覆盖你被分配的 PSID 端口段（不会有
+  漏掉的临时端口被 BR 丢包）
+- **UCI 配置端口转发**，自动校验源端口是否在 PSID 段内
+- **LuCI 集成** —— 协议出现在 网络 → 接口 列表里，编辑页含配置表单
+  和 "自动检测到的参数" 预览面板
+- **纯 iptables**，不依赖 nftables，兼容 fw3
 
-## 安装
-
-本仓库是**后端**包。LuCI 集成是单独的包（见 Plan B）。目前先用 CLI/UCI 配置。
+## 快速安装（arm64 / 通用）
 
 ### 前置依赖
 
-```
+```sh
 opkg install ip-full iptables iptables-mod-conntrack-extra \
              kmod-ip6-tunnel kmod-iptunnel6 jsonfilter
 ```
 
-### 文件部署
-
-```
-mkdir -p /usr/share/mape /usr/bin /lib/netifd/proto \
-         /etc/init.d /etc/hotplug.d/iface /etc/config /etc/sysctl.d
-cp package/mape/files/usr/bin/mape-calc                    /usr/bin/
-cp package/mape/files/usr/share/mape/calc.awk              /usr/share/mape/
-cp package/mape/files/usr/share/mape/rules.json            /usr/share/mape/
-cp package/mape/files/lib/netifd/proto/mape.sh             /lib/netifd/proto/
-cp package/mape/files/etc/init.d/mape-fw                   /etc/init.d/
-cp package/mape/files/etc/hotplug.d/iface/40-mape          /etc/hotplug.d/iface/
-cp package/mape/files/etc/sysctl.d/99-mape.conf            /etc/sysctl.d/
-chmod +x /usr/bin/mape-calc /etc/init.d/mape-fw /etc/hotplug.d/iface/40-mape
-sysctl -p /etc/sysctl.d/99-mape.conf
-```
-
-（Plan C 会提供 IPK，到时候只需 `opkg install mape_*.ipk`。）
-
-## 从手写 mape.sh 迁移
-
-如果你目前用的是手写的 `mape.sh`：
-
-### 1. 停止脚本
-
-把对 `mape.sh` 的调用从 `/etc/rc.local` 或其他位置删掉。装新包后不要再跑 mape.sh。
-
-### 2. 清理 QWrt 自带 MAP-E 的死字段
-
-`/etc/config/network` 里大概率有 QSDK 残留（`type='map-e'`、`peeraddr`、`ipaddr`、
-`ealen` 等挂在 `wan` 段下）。删掉它们：
+### 部署
 
 ```sh
+git clone https://github.com/kazehana99k/openwrt-mape-arm64.JP.git
+cd openwrt-mape-arm64.JP
+
+# 把 package 文件 tar 管道推到路由器（保留路径结构）
+tar -C package/mape/files -cf - . | ssh root@<路由器ip> "cd / && tar -xf -"
+
+# 设置权限 + 加载服务
+ssh root@<路由器ip> '
+    chmod +x /lib/netifd/proto/mape.sh \
+             /usr/bin/mape-calc \
+             /etc/init.d/mape-fw \
+             /etc/hotplug.d/iface/40-mape
+    sysctl -p /etc/sysctl.d/99-mape.conf
+    /etc/init.d/rpcd reload
+    /etc/init.d/network restart   # netifd 必须重启才会注册新 proto
+'
+```
+
+## 配置
+
+### 方式 A —— LuCI 网页（推荐）
+
+1. 打开 **网络 → 接口 → 添加新接口**
+2. 名称：`mape`，协议：`MAP-E (custom)`
+3. 填 **IPv6 PD 前缀**（例如 `2404:7a80:0:0::/56`），**Physical WAN
+   device** 填你的 IPv6 上联接口（例如 `eth4`）
+4. **保存并应用**
+5. 重新编辑接口可以看到 **自动检测到的参数** 面板（ISP / CE IPv6 /
+   IPv4 / BR / PSID）
+
+端口转发：把 `examples/mape.example` 复制到 `/etc/config/mape` 后编辑
+（src_port 必须在 PSID 段内）。
+
+### 方式 B —— CLI / UCI
+
+```sh
+# 1. 清掉 QSDK MAP-E 死字段（如果是从老配置迁移）
 for f in type peeraddr ipaddr ip4prefixlen ip6prefix ip6prefixlen \
          ealen psidlen offset tunlink; do
     uci delete network.wan.$f 2>/dev/null
 done
 uci commit network
-```
 
-### 3. 定义 mape 接口
-
-```sh
+# 2. 定义 mape 接口
 uci set network.mape=interface
 uci set network.mape.proto=mape
-uci set network.mape.pd_prefix='2404:7a80:0:0::/56'    # ← 你的 PD
-uci set network.mape.wan_dev='eth4'                           # ← 你的物理 WAN
+uci set network.mape.pd_prefix='你的 PD'
+uci set network.mape.wan_dev='eth4'
 uci set network.mape.mtu='1460'
 uci set network.mape.legacy_mssfix='1'
 uci commit network
-```
 
-（也可以用 `option tunlink 'wan6'` 替代 `pd_prefix`，从 IPv6 上联自动取 PD。）
+# 备选：option tunlink 'wan6'  从上联接口自动取 PD
 
-### 4. 迁移端口转发
-
-把 mape.sh 里每条 `iptables -t nat -A PREROUTING ... DNAT` 翻译成 UCI 段：
-
-```sh
-uci set mape.web=forward
-uci set mape.web.iface='mape'
-uci set mape.web.proto='tcp'
-uci set mape.web.src_port='4096'
-uci set mape.web.dest_ip='192.168.1.10'
-uci set mape.web.dest_port='80'
-# ... 每条转发重复 ...
-uci commit mape
-```
-
-`examples/mape.example` 里有现成的模板：
-
-```sh
-cp examples/mape.example /etc/config/mape
-```
-
-### 5. 启动
-
-```sh
+# 3. 启动
 ifup mape
 sleep 2
-ip route show default                            # 应该是: default dev mape
-iptables -t nat -L POSTROUTING -n -v | head -5   # 应该有: 30 条 SNAT 规则
-iptables -t nat -L PREROUTING -n -v | head      # 应该有: 你的 DNAT
-ping -c 3 -I mape 1.1.1.1                       # 连通性检查
+ip route show default                          # default dev mape
+ip addr show mape | grep inet                  # 看到 MAP-E 分配的 IPv4
+cat /var/run/mape.mape.json                    # 参数快照
+ping -c 3 -I mape 1.1.1.1                      # 连通性检查
 ```
-
-### 6. 开机自动启动
-
-netifd 自动处理 —— 只要 `/etc/config/network` 里定义了，重启自动起 mape。
 
 ## CLI 速查
 
 ```sh
-# 给定 PD 计算 MAP-E 参数
+# 给定 PD 算 MAP-E 参数
 mape-calc compute 2404:7a80:0:0::/56
 
 # 加端口转发前校验端口是否在 PSID 段内
@@ -131,40 +117,52 @@ mape-calc port-sets 2404:7a80:0:0::/56
 mape-calc list-rules
 ```
 
-## 验证是否工作
-
-```sh
-cat /var/run/mape.mape.json     # 参数快照
-ip -s -6 tunnel show mape       # 隧道流量统计
-logread -t 100 | grep mape      # 最近日志
-```
-
 ## 手动模式（Asahi Net、transix、So-net 等）
 
-如果你的 ISP 不在规则库里，用手动模式：
+如果你的 ISP 不在规则库里，用手动模式（自己提供所有 RFC 7597 参数）：
 
 ```sh
-uci set network.mape=interface
-uci set network.mape.proto=mape
-uci set network.mape.pd_prefix='你的 PD'
-uci set network.mape.peeraddr='你的 BR 地址'         # 看 ISP 文档
-uci set network.mape.ip6prefix='你的 V6 前缀'        # 例如 '2001:db8::'
+uci set network.mape.peeraddr='你的 BR 地址'       # 看 ISP 文档
+uci set network.mape.ip6prefix='你的 V6 前缀'      # 例如 '2001:db8::'
 uci set network.mape.ip6prefixlen='38'
 uci set network.mape.ipaddr='1.2.3.0'
 uci set network.mape.ip4prefixlen='22'
 uci set network.mape.ealen='18'
 uci set network.mape.psidlen='8'
 uci set network.mape.offset='4'
-uci set network.mape.wan_dev='eth4'
 uci commit network
 ```
 
-## v0.1 限制
+## 验证是否工作
 
-- ISP 数据库覆盖 BIGLOBE / JPNE v6plus / OCN，其他 ISP 需要手动模式
-- 暂无 LuCI 网页 GUI（Plan B）
-- 暂无 IPK 安装包（Plan C）
+```sh
+ip -6 tunnel show mape           # 显示 local/remote/dev
+ip addr show mape | grep inet    # IPv4 绑在 mape 上
+ip route show default            # default dev mape
+cat /var/run/mape.mape.json      # 参数快照
+logread -e mape | tail -20       # 最近日志
+iptables -t nat -L POSTROUTING -n | grep -c "to:"   # 约 25 条 SNAT 规则
+```
+
+LAN 设备打开 https://www.google.com 能正常访问 = 通了。
+
+## 故障排查
+
+| 现象 | 可能原因 | 解决 |
+|---|---|---|
+| `ifup mape` 静默失败 | netifd 没扫到新 proto | `/etc/init.d/network restart` |
+| LuCI 显示 "不支持的协议类型" | proto JS 文件缺失或路径错 | 检查 `/www/luci-static/resources/protocol/mape.js` 存在；浏览器强制刷新 |
+| "自动检测到的参数：尚未检测到" | rpcd ACL 没加载 | `/etc/init.d/rpcd reload`，然后浏览器刷新 |
+| logread 反复出现 `Cannot find device "mape"` | setup 在静默失败 | `logread -e mape` 看实际报错 |
+| 能上网但 TCP 经常连不上 | SNAT 端口池漏（老版本有这个 bug） | 升级到 v0.1.0+，已用条件概率修复 |
+
+## 限制
+
+- ISP 数据库覆盖 BIGLOBE（A & B）/ JPNE v6plus / OCN。Asahi Net、
+  transix、So-net 等需要手动模式（或提交 PR 加规则）
+- 暂无 IPK 安装包 —— 安装走 `cp`
+- 端口转发暂无独立 GUI（用 LuCI 网络 → "MAP-E"，或手编 `/etc/config/mape`）
 
 ## 许可证
 
-MIT — 见 `LICENSE`。
+MIT —— 见 `LICENSE`。
