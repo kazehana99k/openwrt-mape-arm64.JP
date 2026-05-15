@@ -38,11 +38,11 @@ type='map-e'` を設定するもの）にはバグがあり、トンネルが確
 LuCI ネットワーク → インターフェース —— `mape` がプロトコル
 `MAP-E (custom)` の正規インターフェースとして表示されます：
 
-![LuCI インターフェース一覧](docs/images/luci-interfaces.png)
+![LuCI インターフェース一覧](docs/images/luci-interfaces.jpg)
 
 編集画面に「自動検出されたパラメーター」プレビューパネル：
 
-![LuCI 編集画面](docs/images/luci-edit.png)
+![LuCI 編集画面](docs/images/luci-edit.jpg)
 
 ## ワンクリックインストール（推奨）
 

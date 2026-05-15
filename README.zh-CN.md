@@ -30,11 +30,11 @@ QSDK / QWrt 自带的 MAP-E（在 wan 接口上配 `proto='none' type='map-e'`�
 
 LuCI 网络 → 接口 —— `mape` 作为正经接口出现，协议显示 `MAP-E (custom)`：
 
-![LuCI 接口列表](docs/images/luci-interfaces.png)
+![LuCI 接口列表](docs/images/luci-interfaces.jpg)
 
 编辑页含 "自动检测到的参数" 预览面板：
 
-![LuCI 编辑页](docs/images/luci-edit.png)
+![LuCI 编辑页](docs/images/luci-edit.jpg)
 
 ## 一键安装（推荐）
 

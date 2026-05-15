@@ -36,11 +36,11 @@ implementation that:
 LuCI Network → Interfaces — `mape` shows up as a first-class interface
 with the protocol `MAP-E (custom)`:
 
-![LuCI interfaces list](docs/images/luci-interfaces.png)
+![LuCI interfaces list](docs/images/luci-interfaces.jpg)
 
 Edit page with auto-detected parameters preview:
 
-![LuCI edit page](docs/images/luci-edit.png)
+![LuCI edit page](docs/images/luci-edit.jpg)
 
 ## Quick install (one-line, recommended)
 
