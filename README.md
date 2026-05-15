@@ -31,7 +31,41 @@ implementation that:
   with a configuration form and an "Auto-detected parameters" preview
 - **Pure iptables**, no nftables required; compatible with fw3
 
-## Quick install (arm64 / generic)
+## Screenshots
+
+LuCI Network → Interfaces — `mape` shows up as a first-class interface
+with the protocol `MAP-E (custom)`:
+
+![LuCI interfaces list](docs/images/luci-interfaces.png)
+
+Edit page with auto-detected parameters preview:
+
+![LuCI edit page](docs/images/luci-edit.png)
+
+## Quick install (one-line, recommended)
+
+ssh into your router as root, then run:
+
+```sh
+wget -O - https://github.com/kazehana99k/openwrt-mape-arm64.JP/releases/latest/download/install.sh | sh
+```
+
+The installer will:
+
+1. Verify you're on OpenWrt / QWrt
+2. `opkg install` the prerequisites (ip-full, iptables, kmod-ip6-tunnel, jsonfilter, …)
+3. Download and extract the latest release tarball into `/`
+4. Set executable permissions, apply sysctl tuning, reload rpcd
+5. Print next steps (restart netifd, configure interface)
+
+After installation, run `/etc/init.d/network restart` to register the
+new `mape` protocol with netifd, then configure via LuCI or CLI (see
+below).
+
+> Prefer to inspect the script first?
+> `wget` then `less install.sh` then `sh install.sh`.
+
+## Manual install (from source)
 
 ### Prerequisites
 

@@ -26,7 +26,39 @@ QSDK / QWrt 自带的 MAP-E（在 wan 接口上配 `proto='none' type='map-e'`�
   和 "自动检测到的参数" 预览面板
 - **纯 iptables**，不依赖 nftables，兼容 fw3
 
-## 快速安装（arm64 / 通用）
+## 截图
+
+LuCI 网络 → 接口 —— `mape` 作为正经接口出现，协议显示 `MAP-E (custom)`：
+
+![LuCI 接口列表](docs/images/luci-interfaces.png)
+
+编辑页含 "自动检测到的参数" 预览面板：
+
+![LuCI 编辑页](docs/images/luci-edit.png)
+
+## 一键安装（推荐）
+
+ssh 进路由器，root 用户跑：
+
+```sh
+wget -O - https://github.com/kazehana99k/openwrt-mape-arm64.JP/releases/latest/download/install.sh | sh
+```
+
+安装脚本做的事：
+
+1. 验证你在 OpenWrt / QWrt 上
+2. `opkg install` 前置依赖（ip-full、iptables、kmod-ip6-tunnel、jsonfilter 等）
+3. 下载最新 release tarball 解压到 `/`
+4. 设置可执行权限、应用 sysctl、reload rpcd
+5. 打印下一步操作（重启 netifd、配置接口）
+
+安装完成后跑 `/etc/init.d/network restart` 让 netifd 注册 `mape` 协议，
+然后用 LuCI 或 CLI 配置（看下面）。
+
+> 想先看一眼脚本内容？
+> `wget` 下来 → `less install.sh` 检查 → `sh install.sh`
+
+## 手动安装（从源码）
 
 ### 前置依赖
 

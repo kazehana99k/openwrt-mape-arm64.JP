@@ -33,7 +33,40 @@ type='map-e'` を設定するもの）にはバグがあり、トンネルが確
   「自動検出されたパラメーター」プレビューパネルが利用可能
 - **iptables のみ**で動作、nftables は不要、fw3 と互換
 
-## クイックインストール（arm64 / 汎用）
+## スクリーンショット
+
+LuCI ネットワーク → インターフェース —— `mape` がプロトコル
+`MAP-E (custom)` の正規インターフェースとして表示されます：
+
+![LuCI インターフェース一覧](docs/images/luci-interfaces.png)
+
+編集画面に「自動検出されたパラメーター」プレビューパネル：
+
+![LuCI 編集画面](docs/images/luci-edit.png)
+
+## ワンクリックインストール（推奨）
+
+ルーターに root で ssh して、次のコマンドを実行：
+
+```sh
+wget -O - https://github.com/kazehana99k/openwrt-mape-arm64.JP/releases/latest/download/install.sh | sh
+```
+
+このインストーラーは：
+
+1. OpenWrt / QWrt 上で動作していることを確認
+2. 前提パッケージ（ip-full、iptables、kmod-ip6-tunnel、jsonfilter 等）を `opkg install`
+3. 最新リリースの tarball をダウンロードして `/` に展開
+4. 実行権限を設定、sysctl チューニングを適用、rpcd を再読込
+5. 次のステップを表示（netifd を再起動、インターフェースを設定）
+
+インストール完了後、`/etc/init.d/network restart` で `mape` プロトコルを
+netifd に登録してから、LuCI または CLI で設定してください（下記参照）。
+
+> スクリプトを先に確認したい場合：
+> `wget` でダウンロード → `less install.sh` で確認 → `sh install.sh`
+
+## 手動インストール（ソースから）
 
 ### 前提パッケージ
 

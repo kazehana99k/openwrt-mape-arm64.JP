@@ -12,3 +12,4 @@ probe-env.sh
 
 # Internal dev plans/specs (not for public release)
 docs/superpowers/
+build/
