@@ -1,0 +1,16 @@
+# /etc/config/mape — MAP-E port forwarding rules.
+#
+# Example (uncomment and edit):
+#
+# config forward 'web'
+#     option enabled  '1'
+#     option iface    'mape'
+#     option name     'Web server'
+#     option proto    'tcp'
+#     option src_port '4096'
+#     option dest_ip  '192.168.1.10'
+#     option dest_port '80'
+#
+# Note: src_port MUST fall within the PSID-allocated port range for the
+# active mape interface. Use `mape-calc check-port <port> --pd <prefix>`
+# to verify.

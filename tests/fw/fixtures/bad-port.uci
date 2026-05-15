@@ -1,0 +1,7 @@
+config forward 'wrong'
+    option enabled  '1'
+    option iface    'mape'
+    option proto    'tcp'
+    option src_port '80'
+    option dest_ip  '192.168.1.10'
+    option dest_port '80'

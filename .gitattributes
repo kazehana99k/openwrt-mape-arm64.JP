@@ -1,0 +1,9 @@
+# Enforce LF line endings for all text files. The repo targets POSIX
+# shells (sh, awk, ucode) on OpenWrt; CRLF would break shebang lines and
+# golden-file regression tests.
+* text=auto eol=lf
+
+# fc2 fixture is treated as binary to preserve its exact byte sequence
+# (Shift_JIS encoded HTML; Task 1.6 idempotency depends on byte equality).
+tests/extract/fixtures/*.html binary
+docs/reference-fc2-calc.html  binary

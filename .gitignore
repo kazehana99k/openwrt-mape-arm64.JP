@@ -1,0 +1,14 @@
+.scratch/
+*.swp
+*.swo
+*~
+.DS_Store
+build/
+ipkg-*/
+
+# Debug/test artifacts (not source)
+router-validate.log
+probe-env.sh
+
+# Internal dev plans/specs (not for public release)
+docs/superpowers/

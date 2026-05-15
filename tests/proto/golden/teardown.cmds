@@ -1,0 +1,7 @@
+PURGE: iptables nat rules tagged 'mape:mape' (skipped under dry-run; live: iterate iptables-save | grep -v mape:mape | iptables-restore)
+PURGE: iptables filter rules tagged 'mape:mape' (skipped under dry-run; live: iterate iptables-save | grep -v mape:mape | iptables-restore)
+PURGE: iptables mangle rules tagged 'mape:mape' (skipped under dry-run; live: iterate iptables-save | grep -v mape:mape | iptables-restore)
+RUN: ip route del default dev mape
+RUN: ip link set mape down
+RUN: ip -6 tunnel del mape
+RUN: ip -6 addr del 2404:7a80:0:0:85:c800:0:0/128 dev eth4

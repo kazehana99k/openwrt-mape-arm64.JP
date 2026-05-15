@@ -1,0 +1,9 @@
+WRITE: 1 -> /proc/sys/net/ipv4/ip_forward
+WRITE: 0 -> /proc/sys/net/ipv4/conf/all/rp_filter
+WRITE: 0 -> /proc/sys/net/ipv4/conf/default/rp_filter
+WRITE: 0 -> /proc/sys/net/ipv4/conf/eth4/rp_filter
+RUN: ip -6 addr del 2404:7a80:0:0:85:c800:0:0/128 dev eth4
+RUN: ip -6 addr add 2404:7a80:0:0:85:c800:0:0/128 dev eth4
+RUN: ip -6 tunnel add mape mode ipip6 remote 2001:260:700:1::1:275 local 2404:7a80:0:0:85:c800:0:0 encaplimit none dev eth4
+RUN: ip link set mape up
+RUN: ip link set mape mtu 1460

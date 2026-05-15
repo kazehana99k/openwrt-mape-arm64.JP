@@ -1,0 +1,176 @@
+#!/bin/sh /etc/rc.common
+# mape-fw — apply UCI port-forwarding rules to mape interfaces.
+#
+# Reads /etc/config/mape (forward sections) and translates each enabled
+# entry into iptables PREROUTING DNAT + FORWARD ACCEPT rules.
+#
+# Triggered by /etc/hotplug.d/iface/40-mape on ifup mape.
+
+START=99
+STOP=10
+USE_PROCD=1
+
+MAPE_CALC="${MAPE_CALC:-/usr/bin/mape-calc}"
+MAPE_STATE_DIR="${MAPE_STATE_DIR:-/var/run}"
+
+_fw_run() {
+    if [ "${MAPE_DRY_RUN:-0}" = 1 ]; then
+        printf 'RUN:'
+        for arg; do printf ' %s' "$arg"; done
+        printf '\n'
+        return 0
+    fi
+    "$@"
+}
+
+_fw_log() {
+    if [ "${MAPE_DRY_RUN:-0}" = 1 ]; then
+        echo "LOG: $*"
+    else
+        logger -t mape-fw "$*"
+    fi
+}
+
+# Load and apply all forward sections.
+apply() {
+    config_load mape
+    config_foreach _fw_apply_one forward
+}
+
+# Remove all rules tagged 'mape-fw:*'.
+clear_all() {
+    if [ "${MAPE_DRY_RUN:-0}" = 1 ]; then
+        echo "PURGE: iptables nat/filter rules tagged 'mape-fw:' (skipped under dry-run)"
+        return 0
+    fi
+    # iptables-save quotes comment values: --comment "mape-fw:..."
+    iptables-save -t nat 2>/dev/null \
+        | grep -v -- "--comment \"mape-fw:" \
+        | iptables-restore -T nat
+    iptables-save -t filter 2>/dev/null \
+        | grep -v -- "--comment \"mape-fw:" \
+        | iptables-restore -T filter
+}
+
+# Read the active mape interface's PSID range from its status file.
+# Returns: PSID_BOUNDS env var = "start1 end1 start2 end2 ..." for all sets.
+# Uses jsonfilter if available, falls back to sed for dev environments.
+_fw_get_psid_bounds() {
+    local iface="$1"
+    local state="$MAPE_STATE_DIR/mape.$iface.json"
+    [ -f "$state" ] || { echo "missing status file: $state" >&2; return 1; }
+
+    local psid offset psidlen
+    if command -v jsonfilter >/dev/null 2>&1; then
+        psid=$(jsonfilter -i "$state" -e '@.psid' 2>/dev/null)
+        offset=$(jsonfilter -i "$state" -e '@.psid_offset' 2>/dev/null)
+        psidlen=$(jsonfilter -i "$state" -e '@.psid_len' 2>/dev/null)
+    else
+        psid=$(sed -n 's/.*"psid": *\([0-9]*\).*/\1/p' "$state" | head -1)
+        offset=$(sed -n 's/.*"psid_offset": *\([0-9]*\).*/\1/p' "$state" | head -1)
+        psidlen=$(sed -n 's/.*"psid_len": *\([0-9]*\).*/\1/p' "$state" | head -1)
+    fi
+
+    [ -n "$psid" ] && [ -n "$offset" ] && [ -n "$psidlen" ] || return 1
+
+    # Compute and emit "start1 end1 start2 end2 ..." for all (2^offset - 1) sets.
+    local n_sets=$(( (1 << offset) - 1 ))
+    local set_size=$(( 1 << (16 - offset - psidlen) ))
+    local a start end
+    PSID_BOUNDS=""
+    a=1
+    while [ "$a" -le "$n_sets" ]; do
+        start=$(( (a << (16 - offset)) | (psid << (16 - offset - psidlen)) ))
+        end=$(( start + set_size - 1 ))
+        PSID_BOUNDS="$PSID_BOUNDS $start $end"
+        a=$((a + 1))
+    done
+}
+
+_fw_port_in_psid() {
+    local port="$1" start end
+    set -- $PSID_BOUNDS
+    while [ $# -ge 2 ]; do
+        start="$1"; end="$2"; shift 2
+        [ "$port" -ge "$start" ] && [ "$port" -le "$end" ] && return 0
+    done
+    return 1
+}
+
+_fw_apply_one() {
+    local cfg="$1"
+    local enabled iface name proto src_port dest_ip dest_port lan_bridge tag
+
+    config_get enabled    "$cfg" enabled    1
+    config_get iface      "$cfg" iface      mape
+    config_get name       "$cfg" name       "$cfg"
+    config_get proto      "$cfg" proto      tcp
+    config_get src_port   "$cfg" src_port   ""
+    config_get dest_ip    "$cfg" dest_ip    ""
+    config_get dest_port  "$cfg" dest_port  ""
+
+    [ "$enabled" = 1 ] || return 0
+    [ -n "$src_port" ] && [ -n "$dest_ip" ] && [ -n "$dest_port" ] || {
+        _fw_log "skip $cfg: missing src_port/dest_ip/dest_port"
+        return 0
+    }
+
+    lan_bridge="${MAPE_LAN_BRIDGE:-br-lan}"
+    tag="mape-fw:$iface:$cfg"
+
+    _fw_get_psid_bounds "$iface" || {
+        _fw_log "skip $cfg: cannot read PSID bounds for $iface"
+        return 0
+    }
+
+    if ! _fw_port_in_psid "$src_port"; then
+        _fw_log "skip $cfg: src_port $src_port not in PSID-allocated range"
+        return 0
+    fi
+
+    case "$proto" in
+        tcpudp)
+            for p in tcp udp; do
+                _fw_emit_one "$iface" "$cfg" "$p" "$src_port" \
+                             "$dest_ip" "$dest_port" "$lan_bridge" "$tag"
+            done
+            ;;
+        tcp|udp)
+            _fw_emit_one "$iface" "$cfg" "$proto" "$src_port" \
+                         "$dest_ip" "$dest_port" "$lan_bridge" "$tag"
+            ;;
+        *)
+            _fw_log "skip $cfg: unknown proto '$proto'"
+            ;;
+    esac
+}
+
+_fw_emit_one() {
+    local iface="$1" cfg="$2" proto="$3" src_port="$4" dest_ip="$5" \
+          dest_port="$6" lan_bridge="$7" tag="$8"
+
+    _fw_run iptables -t nat -A PREROUTING -i "$iface" \
+        -p "$proto" --dport "$src_port" \
+        -j DNAT --to-destination "$dest_ip:$dest_port" \
+        -m comment --comment "$tag"
+
+    _fw_run iptables -I FORWARD 1 -i "$iface" -o "$lan_bridge" \
+        -p "$proto" --dport "$dest_port" -d "$dest_ip" \
+        -j ACCEPT -m comment --comment "$tag"
+}
+
+start_service() {
+    procd_open_instance mape-fw
+    procd_set_param command /bin/true
+    procd_close_instance
+    apply
+}
+
+stop_service() {
+    clear_all
+}
+
+reload_service() {
+    clear_all
+    apply
+}

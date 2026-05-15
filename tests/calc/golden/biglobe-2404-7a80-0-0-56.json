@@ -1,0 +1,29 @@
+{
+  "rule_id": "biglobe-a-2404-7a80",
+  "isp_name": "BIGLOBE IPv6オプション (A)",
+  "br_ipv6": "2001:260:700:1::1:275",
+  "ce_ipv6": "2404:7a80:0:0:85:c800:0:0",
+  "ipv4": "133.200.0.0",
+  "psid": 0,
+  "psid_offset": 4,
+  "psid_len": 8,
+  "ea_len": 25,
+  "v4_prefix_len": 15,
+  "port_sets": [
+    {"start": 4096, "end": 4111, "probability": "0.06667"},
+    {"start": 8192, "end": 8207, "probability": "0.06667"},
+    {"start": 12288, "end": 12303, "probability": "0.06667"},
+    {"start": 16384, "end": 16399, "probability": "0.06667"},
+    {"start": 20480, "end": 20495, "probability": "0.06667"},
+    {"start": 24576, "end": 24591, "probability": "0.06667"},
+    {"start": 28672, "end": 28687, "probability": "0.06667"},
+    {"start": 32768, "end": 32783, "probability": "0.06667"},
+    {"start": 36864, "end": 36879, "probability": "0.06667"},
+    {"start": 40960, "end": 40975, "probability": "0.06667"},
+    {"start": 45056, "end": 45071, "probability": "0.06667"},
+    {"start": 49152, "end": 49167, "probability": "0.06667"},
+    {"start": 53248, "end": 53263, "probability": "0.06667"},
+    {"start": 57344, "end": 57359, "probability": "0.06667"},
+    {"start": 61440, "end": 61455, "probability": "0.06667"}
+  ]
+}

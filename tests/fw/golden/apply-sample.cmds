@@ -1,0 +1,4 @@
+RUN: iptables -t nat -A PREROUTING -i mape -p tcp --dport 4096 -j DNAT --to-destination 192.168.1.10:80 -m comment --comment mape-fw:mape:web
+RUN: iptables -I FORWARD 1 -i mape -o br-lan -p tcp --dport 80 -d 192.168.1.10 -j ACCEPT -m comment --comment mape-fw:mape:web
+RUN: iptables -t nat -A PREROUTING -i mape -p tcp --dport 4097 -j DNAT --to-destination 192.168.1.10:22 -m comment --comment mape-fw:mape:ssh
+RUN: iptables -I FORWARD 1 -i mape -o br-lan -p tcp --dport 22 -d 192.168.1.10 -j ACCEPT -m comment --comment mape-fw:mape:ssh

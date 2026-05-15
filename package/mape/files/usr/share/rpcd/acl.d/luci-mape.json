@@ -1,0 +1,11 @@
+{
+	"luci-mape": {
+		"description": "Grant LuCI read access to MAP-E status files and rule database",
+		"read": {
+			"file": {
+				"/var/run/mape.*.json": [ "read" ],
+				"/usr/share/mape/rules.json": [ "read" ]
+			}
+		}
+	}
+}

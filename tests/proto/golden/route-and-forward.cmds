@@ -1,0 +1,3 @@
+RUN: ip route add default dev mape
+RUN: iptables -I FORWARD 1 -i mape -o br-lan -j ACCEPT -m comment --comment mape:mape
+RUN: iptables -I FORWARD 1 -i br-lan -o mape -j ACCEPT -m comment --comment mape:mape

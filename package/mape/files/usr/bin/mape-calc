@@ -1,0 +1,106 @@
+#!/bin/sh
+# mape-calc — MAP-E parameter calculator CLI.
+#
+# Subcommands:
+#   compute <pd>              Compute parameters for the given PD prefix
+#   detect <pd>               Same as compute (auto-picks rule; explicit alias)
+#   list-rules                Print one line per rule: <id> <isp_name> <br>
+#   check-port <port> <pd>    Verify port falls in PSID-allocated range
+#   port-sets <pd>            Print port-set start/end/probability tuples
+#
+# Locations of data files (override with env for testing):
+RULES_JSON="${MAPE_RULES_JSON:-/usr/share/mape/rules.json}"
+CALC_AWK="${MAPE_CALC_AWK:-/usr/share/mape/calc.awk}"
+
+set -e
+
+usage() {
+    cat <<EOF
+Usage: mape-calc compute <pd-prefix>
+       mape-calc detect <pd-prefix>
+       mape-calc list-rules
+       mape-calc check-port <port> <pd-prefix>
+       mape-calc port-sets <pd-prefix>
+
+Examples:
+  mape-calc compute 2404:7a80:0:0::/56
+  mape-calc check-port 7840 2404:7a80:0:0::/56
+EOF
+    exit 1
+}
+
+require_pd() {
+    case "$1" in
+        *:*) ;;
+        *) echo "Error: PD prefix required" >&2; usage ;;
+    esac
+}
+
+cmd="$1"; shift 2>/dev/null || true
+
+case "$cmd" in
+    compute|detect)
+        require_pd "$1"
+        exec awk -f "$CALC_AWK" -v pd="$1" -v rules="$RULES_JSON"
+        ;;
+    list-rules)
+        # Format: <id>\t<isp_name>\t<br>\t<v6_prefix>/<v6_prefix_len>
+        i=0
+        while id=$(jsonfilter -i "$RULES_JSON" -e "@.rules[$i].id" 2>/dev/null) \
+              && [ -n "$id" ]; do
+            isp=$(jsonfilter -i "$RULES_JSON" -e "@.rules[$i].isp_name")
+            br=$(jsonfilter -i "$RULES_JSON" -e "@.rules[$i].br")
+            v6p=$(jsonfilter -i "$RULES_JSON" -e "@.rules[$i].v6_prefix")
+            v6l=$(jsonfilter -i "$RULES_JSON" -e "@.rules[$i].v6_prefix_len")
+            printf "%s\t%s\t%s\t%s/%s\n" "$id" "$isp" "$br" "$v6p" "$v6l"
+            i=$((i + 1))
+        done
+        ;;
+
+    port-sets)
+        require_pd "$1"
+        # Reuse compute, then jsonfilter the port_sets array
+        json=$("$0" compute "$1")
+        i=0
+        while start=$(echo "$json" | jsonfilter -e "@.port_sets[$i].start" 2>/dev/null) \
+              && [ -n "$start" ]; do
+            end=$(echo "$json" | jsonfilter -e "@.port_sets[$i].end")
+            prob=$(echo "$json" | jsonfilter -e "@.port_sets[$i].probability")
+            printf "%d\t%d\t%s\n" "$start" "$end" "$prob"
+            i=$((i + 1))
+        done
+        ;;
+
+    check-port)
+        port="$1"
+        require_pd "$2"
+        case "$port" in
+            ''|*[!0-9]*)
+                echo "Error: port must be an integer" >&2
+                exit 2
+                ;;
+        esac
+        json=$("$0" compute "$2")
+        i=0
+        while start=$(echo "$json" | jsonfilter -e "@.port_sets[$i].start" 2>/dev/null) \
+              && [ -n "$start" ]; do
+            end=$(echo "$json" | jsonfilter -e "@.port_sets[$i].end")
+            if [ "$port" -ge "$start" ] && [ "$port" -le "$end" ]; then
+                echo "OK: port $port in set $start-$end"
+                exit 0
+            fi
+            i=$((i + 1))
+        done
+        echo "FAIL: port $port not in any PSID-allocated set" >&2
+        echo "Available sets:" >&2
+        "$0" port-sets "$2" >&2
+        exit 1
+        ;;
+    -h|--help|"")
+        usage
+        ;;
+    *)
+        echo "Unknown subcommand: $cmd" >&2
+        usage
+        ;;
+esac

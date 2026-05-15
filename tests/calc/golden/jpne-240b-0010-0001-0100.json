@@ -1,0 +1,29 @@
+{
+  "rule_id": "jpne-240b-10",
+  "isp_name": "JPNE v6plus",
+  "br_ipv6": "2404:9200:225:100::64",
+  "ce_ipv6": "240b:10:1:100:6a:4800:100:100",
+  "ipv4": "106.72.0.1",
+  "psid": 1,
+  "psid_offset": 4,
+  "psid_len": 8,
+  "ea_len": 25,
+  "v4_prefix_len": 15,
+  "port_sets": [
+    {"start": 4112, "end": 4127, "probability": "0.06667"},
+    {"start": 8208, "end": 8223, "probability": "0.06667"},
+    {"start": 12304, "end": 12319, "probability": "0.06667"},
+    {"start": 16400, "end": 16415, "probability": "0.06667"},
+    {"start": 20496, "end": 20511, "probability": "0.06667"},
+    {"start": 24592, "end": 24607, "probability": "0.06667"},
+    {"start": 28688, "end": 28703, "probability": "0.06667"},
+    {"start": 32784, "end": 32799, "probability": "0.06667"},
+    {"start": 36880, "end": 36895, "probability": "0.06667"},
+    {"start": 40976, "end": 40991, "probability": "0.06667"},
+    {"start": 45072, "end": 45087, "probability": "0.06667"},
+    {"start": 49168, "end": 49183, "probability": "0.06667"},
+    {"start": 53264, "end": 53279, "probability": "0.06667"},
+    {"start": 57360, "end": 57375, "probability": "0.06667"},
+    {"start": 61456, "end": 61471, "probability": "0.06667"}
+  ]
+}

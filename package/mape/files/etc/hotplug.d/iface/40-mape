@@ -1,0 +1,9 @@
+#!/bin/sh
+# /etc/hotplug.d/iface/40-mape — react to mape interface up/down.
+
+[ "$INTERFACE" = "mape" ] || exit 0
+
+case "$ACTION" in
+    ifup)   /etc/init.d/mape-fw reload ;;
+    ifdown) /etc/init.d/mape-fw stop   ;;
+esac

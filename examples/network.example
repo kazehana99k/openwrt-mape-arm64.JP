@@ -1,0 +1,19 @@
+# /etc/config/network — relevant sections for mape interface.
+# Merge into your existing /etc/config/network.
+
+config interface 'mape'
+    option proto         'mape'
+    option pd_prefix     '2404:7a80:0:0::/56'
+    option wan_dev       'eth4'
+    option mtu           '1460'
+    option encaplimit    'none'
+    option legacy_mssfix '1'
+    option snat_mode     'statistic'
+    option icmp_use_first_set '1'
+
+# Alternative: auto-pick PD from upstream IPv6 interface
+#
+# config interface 'mape'
+#     option proto       'mape'
+#     option tunlink     'wan6'
+#     option wan_dev     'eth4'
