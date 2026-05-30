@@ -99,7 +99,7 @@ _fw_port_in_psid() {
 
 _fw_apply_one() {
     local cfg="$1"
-    local enabled iface name proto src_port dest_ip dest_port lan_bridge tag
+    local enabled iface name proto src_port dest_ip dest_port hairpin lan_bridge tag
 
     config_get enabled    "$cfg" enabled    1
     config_get iface      "$cfg" iface      mape
@@ -108,6 +108,7 @@ _fw_apply_one() {
     config_get src_port   "$cfg" src_port   ""
     config_get dest_ip    "$cfg" dest_ip    ""
     config_get dest_port  "$cfg" dest_port  ""
+    config_get hairpin    "$cfg" hairpin    1
 
     [ "$enabled" = 1 ] || return 0
     [ -n "$src_port" ] && [ -n "$dest_ip" ] && [ -n "$dest_port" ] || {
@@ -133,11 +134,17 @@ _fw_apply_one() {
             for p in tcp udp; do
                 _fw_emit_one "$iface" "$cfg" "$p" "$src_port" \
                              "$dest_ip" "$dest_port" "$lan_bridge" "$tag"
+                [ "$hairpin" = 1 ] && _fw_emit_hairpin "$iface" "$p" \
+                             "$src_port" "$dest_ip" "$dest_port" \
+                             "$lan_bridge" "$tag"
             done
             ;;
         tcp|udp)
             _fw_emit_one "$iface" "$cfg" "$proto" "$src_port" \
                          "$dest_ip" "$dest_port" "$lan_bridge" "$tag"
+            [ "$hairpin" = 1 ] && _fw_emit_hairpin "$iface" "$proto" \
+                         "$src_port" "$dest_ip" "$dest_port" \
+                         "$lan_bridge" "$tag"
             ;;
         *)
             _fw_log "skip $cfg: unknown proto '$proto'"
@@ -157,6 +164,47 @@ _fw_emit_one() {
     _fw_run iptables -I FORWARD 1 -i "$iface" -o "$lan_bridge" \
         -p "$proto" --dport "$dest_port" -d "$dest_ip" \
         -j ACCEPT -m comment --comment "$tag"
+}
+
+# NAT loopback (hairpin): let LAN clients reach the mapped public IPv4.
+# Adds three rules — LAN-side DNAT, hairpin SNAT, LAN->LAN FORWARD ACCEPT.
+_fw_emit_hairpin() {
+    local iface="$1" proto="$2" src_port="$3" dest_ip="$4" dest_port="$5" \
+          lan_bridge="$6" tag="$7"
+
+    local state="$MAPE_STATE_DIR/mape.$iface.json"
+    local mapped_ipv4 cidr router_lan_ip lan_subnet
+
+    if command -v jsonfilter >/dev/null 2>&1; then
+        mapped_ipv4=$(jsonfilter -i "$state" -e '@.ipv4' 2>/dev/null)
+    else
+        mapped_ipv4=$(sed -n 's/.*"ipv4": *"\([^"]*\)".*/\1/p' "$state" | head -1)
+    fi
+
+    cidr=$(ip -4 -o addr show dev "$lan_bridge" 2>/dev/null | awk '{print $4; exit}')
+    router_lan_ip="${cidr%/*}"
+    lan_subnet="$cidr"
+
+    if [ -z "$mapped_ipv4" ] || [ -z "$router_lan_ip" ] || [ -z "$lan_subnet" ]; then
+        _fw_log "skip hairpin for $tag: mapped_ipv4='$mapped_ipv4' router_lan_ip='$router_lan_ip' lan_subnet='$lan_subnet'"
+        return 0
+    fi
+
+    local hp_tag="${tag}:hairpin"
+
+    _fw_run iptables -t nat -A PREROUTING -i "$lan_bridge" \
+        -d "$mapped_ipv4" -p "$proto" --dport "$src_port" \
+        -j DNAT --to-destination "$dest_ip:$dest_port" \
+        -m comment --comment "$hp_tag"
+
+    _fw_run iptables -t nat -A POSTROUTING -s "$lan_subnet" \
+        -d "$dest_ip" -p "$proto" --dport "$dest_port" \
+        -j SNAT --to-source "$router_lan_ip" \
+        -m comment --comment "$hp_tag"
+
+    _fw_run iptables -I FORWARD 1 -i "$lan_bridge" -o "$lan_bridge" \
+        -p "$proto" -d "$dest_ip" --dport "$dest_port" \
+        -j ACCEPT -m comment --comment "$hp_tag"
 }
 
 start_service() {

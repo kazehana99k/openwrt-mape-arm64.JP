@@ -10,6 +10,8 @@
 #     option src_port '4096'
 #     option dest_ip  '192.168.1.10'
 #     option dest_port '80'
+#     option hairpin  '1'    # NAT loopback: LAN clients can reach the
+#                            # mapped public IPv4. Default 1, set 0 to skip.
 #
 # Note: src_port MUST fall within the PSID-allocated port range for the
 # active mape interface. Use `mape-calc check-port <port> --pd <prefix>`
