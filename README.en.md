@@ -2,9 +2,41 @@
 
 # openwrt-mape-arm64
 
-A working MAP-E client for arm64 OpenWrt / QWrt routers behind Japanese
-ISPs (BIGLOBE IPv6オプション, JPNE v6plus, OCN バーチャルコネクト, etc.).
-Replaces the broken built-in implementation in QSDK / QWrt.
+A MAP-E (RFC 7597) client implementation for arm64 OpenWrt / QWrt routers,
+written entirely in shell + awk + iptables. Replaces the non-working
+MAP-E built into QSDK-derived firmware.
+
+## Background
+
+Major Japanese ISPs — BIGLOBE IPv6オプション, JPNE v6plus, OCN バーチャル
+コネクト and others — deliver service over NTT FLET'S 光 IPv6 IPoE, with
+IPv4 carried inside that IPv6 transport using MAP-E. The CE receives an
+IPv6 prefix, a shared IPv4 address, and a PSID port range; outbound IPv4
+traffic is SNATed into that PSID range and encapsulated in ipip6 to the
+ISP's BR.
+
+On mainline OpenWrt and x86 software routers, this works out of the box:
+the upstream `map` package and the kernel's nftables flow-offload pipeline
+(`nft_flow_offload`) handle it cleanly. The same is true of vendor HGW
+boxes from NEC, I-O DATA, etc.
+
+On aarch64 + QSDK firmware (Xiaomi BE7000, BE10000, QWrt, original QSDK
+12.5, and similar), MAP-E is effectively broken for three reasons:
+
+1. The built-in MAP-E in QSDK 12.5 (configured via `proto='none'
+   type='map-e'`) has bugs — the tunnel often fails to establish, or fw3
+   does not recognize the interface.
+2. The QSDK kernel (5.4 + QCA proprietary patches) lacks the mainline
+   nftables flow-offload pipeline, and the upstream `map` package can't
+   be dropped in without modification.
+3. The hardware-accelerated MAP-E client module
+   (`qca-nss-ppe-tunipip6.ko`) is disabled at compile time in nearly
+   every vendor QWrt build.
+
+## What this package does
+
+Replaces the broken built-in MAP-E with a netifd proto handler that
+builds the ipip6 tunnel, SNAT, and port forwarding from scratch.
 
 > **Architecture**: developed and tested on aarch64 (IPQ95xx, QWrt 25.12),
 > but the package is pure shell + awk + iptables and runs on any

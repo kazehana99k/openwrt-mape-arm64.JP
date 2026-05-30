@@ -2,20 +2,39 @@
 
 # openwrt-mape-arm64
 
-日本の ISP（BIGLOBE IPv6オプション、JPNE v6plus、OCN バーチャルコネクト 等）
-配下にある arm64 OpenWrt / QWrt ルーターのための、動作する MAP-E
-クライアント。QSDK / QWrt 内蔵の壊れた実装を置き換えます。
+arm64 アーキテクチャの OpenWrt / QWrt ルーターで MAP-E（RFC 7597）を
+動作させるためのパッケージ。shell + awk + iptables のみで実装し、
+QSDK 由来のファームウェアで動作しない MAP-E を置き換える。
 
-> **対応アーキテクチャ**：aarch64（IPQ95xx、QWrt 25.12）で開発・検証
-> 済みですが、本パッケージは純粋に shell + awk + iptables のため、
-> OpenWrt が対応する任意のアーキテクチャで動作します。
+## 背景
 
-## なぜ存在するのか
+日本国内の主要 ISP（BIGLOBE IPv6オプション、JPNE v6plus、OCN バーチャル
+コネクト 等）は NTT FLET'S 光の IPv6 IPoE 上でサービスを提供しており、
+IPv4 通信は MAP-E で IPv6 トンネル越しに行う。エンドユーザーの CE が
+IPv6 prefix + 共有 IPv4 + PSID（ポート範囲）の組を受け取り、それに従って
+SNAT してから ipip6 でカプセル化し、ISP の BR に送信する仕組み。
 
-QSDK / QWrt 内蔵の MAP-E（wan インターフェースに `proto='none'
-type='map-e'` を設定するもの）にはバグがあり、トンネルが確立されない
-か、fw3 がインターフェースを認識しないという症状が出ます。本パッケージ
-はこれを動作する実装で置き換えます：
+mainline OpenWrt や x86 ベースのソフトウェアルーターでは、`map` パッケージ
+や nftables の flow offload パイプライン（nft_flow_offload）が整っており、
+MAP-E は問題なく利用できる。NEC や I-O DATA 等の市販 HGW でも同様。
+
+しかし aarch64 + QSDK ベースのファームウェア（Xiaomi BE7000、BE10000 等の
+QWrt や原版 QSDK 12.5）では、以下の理由により MAP-E が事実上機能しない：
+
+1. QSDK 12.5 系統に内蔵される MAP-E 実装（`proto='none' type='map-e'` で
+   設定するもの）にバグがあり、トンネルが確立しないか、fw3 が
+   インターフェースを認識しない
+2. QSDK のカーネル（5.4 + QCA 独自パッチ）には mainline の nftables
+   flow offload パイプラインが含まれず、対応する `map` パッケージも
+   そのままでは組み込めない
+3. ハードウェア加速側の MAP-E クライアントモジュール
+   （qca-nss-ppe-tunipip6.ko）が、ほとんどのベンダー由来 QWrt ビルドでは
+   コンパイル時に無効化されている
+
+## このパッケージの役割
+
+QSDK 内蔵の壊れた MAP-E を置き換え、netifd の正規プロトコルとして
+ipip6 トンネル + SNAT + ポート転送を構築する。
 
 - **ISP を自動判定** —— あなたの IPv6 PD から fc2 計算機の 690 個の
   ルール（BIGLOBE / JPNE v6plus / OCN をカバー）でマッチング。その他の

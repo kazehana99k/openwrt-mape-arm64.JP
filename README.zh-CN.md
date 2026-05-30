@@ -2,12 +2,36 @@
 
 # openwrt-mape-arm64
 
-为 arm64 OpenWrt / QWrt 路由器提供能用的 MAP-E 客户端，目标日本 ISP
-（BIGLOBE IPv6オプション、JPNE v6plus、OCN バーチャルコネクト 等）。
-替代 QSDK / QWrt 自带的有 bug 的实现。
+为 arm64 架构的 OpenWrt / QWrt 路由器提供 MAP-E（RFC 7597）客户端实现，
+完全用 shell + awk + iptables 写成，替换 QSDK 系固件里跑不起来的
+MAP-E 实现。
 
-> **架构说明**：在 aarch64（IPQ95xx，QWrt 25.12）上开发和测试，但本包是
-> 纯 shell + awk + iptables，理论上可以在 OpenWrt 支持的任何架构上跑。
+## 背景
+
+日本主流 ISP（BIGLOBE IPv6オプション、JPNE v6plus、OCN バーチャル
+コネクト 等）都基于 NTT FLET'S 光的 IPv6 IPoE 提供服务，IPv4 流量
+通过 MAP-E 封装在 IPv6 隧道里走。用户 CE 拿到 IPv6 前缀 + 共享 IPv4
+地址 + PSID（端口范围）的组合，出站 IPv4 包按 PSID 范围做 SNAT 后
+用 ipip6 封装发给 ISP 的 BR。
+
+在 mainline OpenWrt 和 x86 软路由上，这套机制是开箱即用的：上游
+`map` 包加 nftables 的 flow offload 流水线（`nft_flow_offload`）配合
+就能正常工作。日本市售的 NEC / I-O DATA 等 HGW 一体机也是同样原理。
+
+但在 aarch64 + QSDK 系固件（小米 BE7000、BE10000、各种 QWrt、原版
+QSDK 12.5 等）上，MAP-E 实际上是废的，原因有三：
+
+1. QSDK 12.5 内置的 MAP-E 实现（`proto='none' type='map-e'` 配置方式）
+   有 bug，ipip6 隧道经常建不起来，或者建起来了 fw3 也认不出接口。
+2. QSDK 用的内核（5.4 + 一堆 QCA 私有 patch）里没有 mainline 的
+   nftables flow offload 流水线，上游 `map` 包没法直接挪过来用。
+3. 硬件加速侧的 MAP-E 客户端模块（`qca-nss-ppe-tunipip6.ko`）在几乎
+   所有厂商的 QWrt build 里都被编译时关掉了。
+
+## 这个包做什么
+
+替换 QSDK 自带跑不起来的 MAP-E，作为 netifd 的标准 proto handler
+重新搭建 ipip6 隧道 + SNAT + 端口转发的整套链路。
 
 ## 为什么有这个项目
 
