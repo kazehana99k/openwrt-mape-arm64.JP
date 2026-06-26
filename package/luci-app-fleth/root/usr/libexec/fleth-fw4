@@ -1,0 +1,831 @@
+#!/bin/sh
+# author: huggy<fleth@huggy.moe>
+
+DNS_E=2404:1a8:7f01:a::3
+DNS_W=2001:a7ff:5f01::a
+
+# Lock file for preventing concurrent execution
+LOCK_FILE="/var/run/fleth.lock"
+LOCK_FD=200
+
+# MAP.sh paths
+MAPSH_PATH="/lib/netifd/proto/map.sh"
+MAPSH_BACKUP_PATH="/lib/netifd/proto/map.sh.flethbak"
+FLETH_MAPSH_PATH="/usr/share/fleth/map.sh"
+
+# Commands that don't require UCI configuration
+if [ "$1" = "hook_none.js" ] || [ "$1" = "restore_none.js" ]; then
+    # Skip UCI configuration checks for these commands
+    :
+else
+    # Note: UCI variables are not validated here as malicious modification
+    h_ENABLED=$(uci get fleth.global.enabled 2>/dev/null)
+    h_TUNNEL_INTERFACE=$(uci get fleth.global.interface 2>/dev/null)
+    h_TUNNEL_INTERFACE_MTU=$(uci get fleth.global.mtu 2>/dev/null)
+    h_TUNNEL_INTERFACE_zone=$(uci get fleth.global.interface_zone 2>/dev/null)
+    h_UPLINK_INTERFACE=$(uci get fleth.global.interface6 2>/dev/null)
+
+    if [ -z "$h_ENABLED" ] || [ -z "$h_TUNNEL_INTERFACE" ] || [ -z "$h_TUNNEL_INTERFACE_MTU" ] || [ -z "$h_UPLINK_INTERFACE" ]; then
+        echo "Failed to retrieve one or more configuration values"
+        exit 1
+    fi
+fi
+
+# real xxxx
+r_TYPE="UNKNOWN"
+# DS-Lite
+r_AFTR=""
+r_AFTR_DOMAIN="UNKNOWN"
+# map-e
+r_PEERADDR=""
+r_IPADDR=""
+r_IP4PREFIXLEN=""
+r_IP6PREFIX=""
+r_IP6PREFIXLEN=""
+r_EALEN=""
+r_PSIDLEN=""
+r_OFFSET=""
+
+
+e_AREA="UNKNOWN"
+
+get_area(){
+    # east or west
+    if [ -f /tmp/resolv.conf.d/resolv.conf.auto ]; then
+        if grep -q "flets-east.jp" /tmp/resolv.conf.d/resolv.conf.auto; then
+            e_AREA="EAST"
+            DNS=$DNS_E
+        elif grep -q "flets-west.jp" /tmp/resolv.conf.d/resolv.conf.auto; then
+            e_AREA="WEST"
+            DNS=$DNS_W
+        fi
+    fi
+    if [ "$e_AREA" = "UNKNOWN" ]; then
+        if wget --timeout=1 -s "http://[2404:1a8:f401:100::1]/l/__healthcheck" -O /dev/null > /dev/null 2>&1; then
+            e_AREA="EAST"
+            DNS=$DNS_E
+        else
+            if wget --timeout=1 -s "http://[2001:a7ff:ff0e:1::2]/l/__healthcheck" -O /dev/null > /dev/null 2>&1; then
+                e_AREA="WEST"
+                DNS=$DNS_W
+            fi
+        fi
+    fi
+    
+    echo "$e_AREA"
+}
+
+get_pending_status(){
+    # Check if IPv6 address is in specific ranges to determine pending status
+    local ipv6=$(get_uplink_interface_ipv6)
+    if [ -n "$ipv6" ]; then
+        # East: 2001:c90::/32, 2404:1a8::/32, 2408::/22
+        # https://bgp.he.net/net/2408::/22#_rdap
+        if echo "$ipv6" | grep -qE '^2001:c90:|^2404:1a8:|^2408:([0-3][0-9a-f]{0,2})?:'; then
+            logger -t fleth "Detected East IPv6 address in pending state: $ipv6"
+            echo "EAST_pending"
+            return
+        # West: 2001:d70::/30, 2001:a000::/21
+        elif echo "$ipv6" | grep -qE '^2001:d7[0-3]:|^2001:a[0-7][0-9a-f]{2}:'; then
+            logger -t fleth "Detected West IPv6 address in pending state: $ipv6"
+            echo "WEST_pending"
+            return
+        fi
+    fi
+    echo ""
+}
+
+get_AAAA_record() {
+    local domain=$1
+    result=$(nslookup -type=AAAA $domain $DNS 2>/dev/null | grep "Address:")
+    if [ -n "$result" ]; then
+        # get line=2
+        echo "$result" | awk 'NR==2' | awk '{print $2}'
+    else
+        echo ""
+    fi
+}
+
+check_ipv6_reachability() {
+    local ip=$1
+    if ping6 -c 1 -w 2 "$ip" > /dev/null 2>&1; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+check_interface_proto_invalid() {
+    local status=$(ifstatus $1 2>/dev/null)
+    if echo "$status" | grep -q '"proto": "none"'; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+filter_global_ipv6() {
+    grep -viE '^(fe80|fc[0-9a-f][0-9a-f]|fd[0-9a-f][0-9a-f]|::|::1|::ffff:0:0|::/96)' | head -n 1
+}
+
+# Verify file SHA256 checksum
+# Usage: verify_sha256 <file_path> <expected_hash>
+# Returns: 0 if match, 1 if mismatch or sha256sum not available
+verify_sha256() {
+    local file_path="$1"
+    local expected_hash="$2"
+
+    if ! command -v sha256sum >/dev/null 2>&1; then
+        logger -t fleth "WARNING: sha256sum not available, skipping checksum verification"
+        return 0  # Continue without verification if tool unavailable
+    fi
+
+    local actual_hash=$(sha256sum "$file_path" | awk '{print $1}')
+
+    if [ "$actual_hash" != "$expected_hash" ]; then
+        logger -t fleth "ERROR: SHA256 checksum mismatch!"
+        logger -t fleth "Expected: $expected_hash"
+        logger -t fleth "Got:      $actual_hash"
+        return 1
+    fi
+    return 0
+}
+
+get_uplink_interface_ipv6() {
+    local uplink_dev
+    local status
+
+    status=$(ifstatus ${h_UPLINK_INTERFACE} 2>/dev/null)
+
+    ipv6_address=$(echo "$status" | jsonfilter -e '@["ipv6-address"][@.preferred > 0].address' 2>/dev/null | filter_global_ipv6)
+    if [ -z "$ipv6_address" ]; then
+        uplink_dev=$(get_uplink_device)
+        if [ -n "$uplink_dev" ]; then
+            ipv6_address=$(ip -6 addr show dev "$uplink_dev" scope global 2>/dev/null | awk '
+                !/ deprecated / {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == "inet6") {
+                            split($(i + 1), addr, "/")
+                            print addr[1]
+                            exit
+                        }
+                    }
+                }
+            ')
+        fi
+    fi
+    if [ -z "$ipv6_address" ]; then
+        ipv6_address=$(echo "$status" | jsonfilter -e '@["ipv6-address"][*].address' 2>/dev/null | filter_global_ipv6)
+    fi
+    if [ -z "$ipv6_address" ]; then
+        [ -n "$uplink_dev" ] || uplink_dev=$(get_uplink_device)
+        if [ -n "$uplink_dev" ]; then
+            ipv6_address=$(ip -6 addr show dev "$uplink_dev" scope global 2>/dev/null | awk '
+                {
+                    for (i = 1; i <= NF; i++) {
+                        if ($i == "inet6") {
+                            split($(i + 1), addr, "/")
+                            print addr[1]
+                            exit
+                        }
+                    }
+                }
+            ')
+        fi
+    fi
+    if [ -z "$ipv6_address" ]; then
+        # PD-only uplinks often have no address in ipv6-address; use the delegated
+        # prefix as MAP-E/IPIP6 calculation input.
+        ipv6_address=$(echo "$status" | jsonfilter -e '@["ipv6-prefix"][@.preferred > 0].address' 2>/dev/null | filter_global_ipv6)
+    fi
+    if [ -z "$ipv6_address" ]; then
+        ipv6_address=$(echo "$status" | jsonfilter -e '@["ipv6-prefix"][*].address' 2>/dev/null | filter_global_ipv6)
+    fi
+    if [ -z "$ipv6_address" ]; then
+        ipv6_address=$(echo "$status" | jsonfilter -e '@.route[*].source' 2>/dev/null | sed 's#/.*##' | filter_global_ipv6)
+    fi
+    echo "$ipv6_address"
+}
+
+get_uplink_prefix_length() {
+    # Get IPv6 prefix length from interface status
+    # Returns prefix length (56 or 64) or empty if not detected
+    local status=$(ifstatus ${h_UPLINK_INTERFACE} 2>/dev/null)
+
+    # Try 1: Get from ipv6-prefix (PD mode, typically /56)
+    local prefix_len=$(echo "$status" | jsonfilter -e '@["ipv6-prefix"][0].mask' 2>/dev/null)
+    if [ -n "$prefix_len" ]; then
+        echo "$prefix_len"
+        return
+    fi
+
+    # Try 2: Get from ipv6-address (SLAAC mode, typically /64)
+    prefix_len=$(echo "$status" | jsonfilter -e '@["ipv6-address"][0].mask' 2>/dev/null)
+    if [ -n "$prefix_len" ]; then
+        echo "$prefix_len"
+        return
+    fi
+
+    # Try 3: Fallback to route info
+    prefix_len=$(echo "$status" | jsonfilter -e '@.route[*].source' 2>/dev/null | grep -viE '^(fe80|fc[0-9a-f][0-9a-f]|fd[0-9a-f][0-9a-f]|::)' | sed -n 's#^.*/\([0-9][0-9]*\)$#\1#p' | head -n 1)
+    if [ -n "$prefix_len" ]; then
+        echo "$prefix_len"
+        return
+    fi
+}
+
+get_uplink_device() {
+    local status
+    local dev=""
+
+    status=$(ifstatus ${h_UPLINK_INTERFACE} 2>/dev/null)
+    if [ -n "$status" ]; then
+        dev=$(echo "$status" | jsonfilter -e '@.l3_device' 2>/dev/null)
+        if [ -z "$dev" ]; then
+            dev=$(echo "$status" | jsonfilter -e '@.device' 2>/dev/null)
+        fi
+    fi
+
+    if [ -z "$dev" ]; then
+        dev=$(uci get network.${h_UPLINK_INTERFACE}.device 2>/dev/null)
+    fi
+    if [ -z "$dev" ]; then
+        dev=$(uci get network.${h_UPLINK_INTERFACE}.ifname 2>/dev/null)
+    fi
+
+    echo "$dev"
+}
+
+get_device_mac() {
+    local dev="$1"
+    local mac=""
+
+    if [ -z "$dev" ]; then
+        return 1
+    fi
+
+    mac=$(cat /sys/class/net/$dev/address 2>/dev/null)
+    if [ -n "$mac" ]; then
+        echo "$mac" | tr -d ':' | tr '[:lower:]' '[:upper:]'
+    fi
+}
+
+restart_uplink_interface() {
+    logger -t fleth "Restarting ${h_UPLINK_INTERFACE} interface"
+    ifdown ${h_UPLINK_INTERFACE} >/dev/null 2>&1
+    sleep 2
+    ifup ${h_UPLINK_INTERFACE} >/dev/null 2>&1
+}
+
+check_prefix_alignment() {
+    # Check if IPv6 prefix is aligned for MAP-E/IPIP6 usage
+    # Skips /56 (ISP-assigned, always aligned) and /64 (SLAAC mode)
+    # Checks /60, /62, etc. (subdivided from /56, may not be aligned)
+    # For non-/56,/64: 4th hextet must end with 00 (e.g., b000 not b004)
+    # Usage: check_prefix_alignment [ipv6_address]
+    # Returns: "ALIGNED" or "NOT_ALIGNED:hextet" or "SKIPPED:/XX"
+
+    local ipv6_addr="${1:-$(get_uplink_interface_ipv6)}"
+
+    if [ -z "$ipv6_addr" ]; then
+        echo "ERROR:NO_IPV6_ADDRESS"
+        return 1
+    fi
+
+    # Check prefix length - /56 and /64 skip alignment check
+    local prefix_len=$(get_uplink_prefix_length)
+    if [ "$prefix_len" = "56" ] || [ "$prefix_len" = "64" ]; then
+        echo "SKIPPED:/$prefix_len"
+        return 0
+    fi
+
+    # Other prefix lengths (/60, /62, etc.) need alignment check
+    # Extract 4th hextet from IPv6 address (format: xxxx:xxxx:xxxx:YYYY::...)
+    local addr_clean=$(echo "$ipv6_addr" | sed 's/%.*$//')
+    local fourth_hextet=$(echo "$addr_clean" | cut -d: -f4)
+
+    if [ -z "$fourth_hextet" ]; then
+        echo "ERROR:INVALID_FORMAT"
+        return 1
+    fi
+
+    # Normalize hextet to 4 digits (pad with leading zeros if needed)
+    fourth_hextet=$(printf "%04x" "0x$fourth_hextet" 2>/dev/null)
+
+    if [ -z "$fourth_hextet" ]; then
+        echo "ERROR:INVALID_HEXTET"
+        return 1
+    fi
+
+    # Check if last 2 hex digits are 00
+    local last_byte=$(echo "$fourth_hextet" | tail -c 3)
+
+    if [ "$last_byte" != "00" ]; then
+        echo "NOT_ALIGNED:$fourth_hextet"
+        return 1
+    fi
+
+    echo "ALIGNED"
+    return 0
+}
+
+auto_setup_ipv6_mode() {
+    # Automatically detect and configure IPv6 mode based on prefix length
+    local prefix_len=$(get_uplink_prefix_length)
+
+    if [ -z "$prefix_len" ]; then
+        logger -t fleth "Unable to detect IPv6 prefix length, skipping auto IPv6 mode configuration"
+        return 1
+    fi
+
+    logger -t fleth "Detected IPv6 prefix length: /$prefix_len"
+
+    if [ "$prefix_len" = "56" ]; then
+        logger -t fleth "Detected /56 prefix, configuring PD mode"
+        $0 setup_ipv6_pd
+    elif [ "$prefix_len" = "64" ]; then
+        logger -t fleth "Detected /64 prefix, configuring SLAAC mode"
+        $0 setup_ipv6_slaac
+    else
+        logger -t fleth "Unexpected prefix length /$prefix_len, skipping auto configuration"
+        return 1
+    fi
+}
+
+auto_configure_extendprefix() {
+    # Automatically configure extendprefix based on IPv6 prefix length
+    # /56 (PD mode) - extendprefix should NOT be set
+    # /64 (SLAAC mode) - extendprefix should be set to 1
+    local prefix_len=$(get_uplink_prefix_length)
+
+    if [ -z "$prefix_len" ]; then
+        logger -t fleth "Unable to detect IPv6 prefix length, skipping extendprefix auto-configuration"
+        return 1
+    fi
+
+    local current_extendprefix=$(uci get network.${h_UPLINK_INTERFACE}.extendprefix 2>/dev/null)
+    local config_changed=0
+
+    if [ "$prefix_len" = "56" ]; then
+        # For /56 (PD mode), extendprefix should NOT be set
+        if [ -n "$current_extendprefix" ]; then
+            logger -t fleth "Detected /56 prefix, removing extendprefix from ${h_UPLINK_INTERFACE}"
+            uci delete network.${h_UPLINK_INTERFACE}.extendprefix 2>/dev/null
+            config_changed=1
+        fi
+    elif [ "$prefix_len" = "64" ]; then
+        # For /64 (SLAAC mode), extendprefix should be set to 1
+        if [ "$current_extendprefix" != "1" ]; then
+            logger -t fleth "Detected /64 prefix, setting extendprefix=1 on ${h_UPLINK_INTERFACE}"
+            uci set network.${h_UPLINK_INTERFACE}.extendprefix=1
+            config_changed=1
+        fi
+    fi
+
+    # Only commit and restart if configuration changed
+    if [ "$config_changed" = "1" ]; then
+        uci commit network
+        logger -t fleth "Restarting ${h_UPLINK_INTERFACE} due to extendprefix configuration change"
+        ifdown ${h_UPLINK_INTERFACE}; sleep 2; ifup ${h_UPLINK_INTERFACE}
+    fi
+
+    return 0
+}
+
+# https://ipv4.web.fc2.com/map-e.html
+get_mape_provider() {
+    # I can't rewritten calc logic with shell, asking lua for help
+    t_DATA=$(lua /usr/sbin/fleth-map-e.lua calc "$ipv6_address")
+    # kanashii code kana
+    # yo ku wa ka ra na i
+    printf "%s" "$t_DATA"
+    if [ "$t_DATA" != "UNKNOWN" ]; then
+        t_i=0
+        while IFS= read -r line; do
+            t_i=$((t_i + 1))
+            case "$t_i" in
+                3) r_PEERADDR=$line ;;
+                4) r_IPADDR=$line ;;
+                5) r_IP4PREFIXLEN=$line ;;
+                6) r_IP6PREFIX=$line ;;
+                7) r_IP6PREFIXLEN=$line ;;
+                8) r_EALEN=$line ;;
+                9) r_PSIDLEN=$line ;;
+                10) r_OFFSET=$line ;;
+            esac
+        done << EOF
+$t_DATA
+EOF
+        r_TYPE="map-e"
+    fi
+}
+
+get_mape_psid() {
+    local ipv6="$1"
+    local psidlen="$2"
+    local fourth_hextet
+    local high_byte
+    local psid
+
+    fourth_hextet=$(echo "$ipv6" | sed 's/%.*$//' | cut -d: -f4)
+    high_byte=$(printf "%04x" "0x$fourth_hextet" 2>/dev/null | sed 's/..$//')
+    [ -n "$high_byte" ] || return 1
+
+    psid=$(printf "%d" "0x$high_byte" 2>/dev/null)
+    [ -n "$psid" ] || return 1
+
+    if [ "$psidlen" = "6" ]; then
+        psid=$(((psid & 63) << 10))
+    elif [ "$psidlen" = "8" ]; then
+        psid=$((psid << 8))
+    else
+        return 1
+    fi
+
+    echo "$psid"
+}
+
+# https://qiita.com/site_u/items/b6d5097f5e3a0f91c95d
+get_dslite_provider(){
+    # check type with DS-LITE
+    # 1. transix can't be resolved outside
+    t_TRANSIX=$(get_AAAA_record "gw.transix.jp")
+    if [ -n "$t_TRANSIX" ]; then
+        r_TYPE="ds-lite"
+        r_AFTR=$t_TRANSIX
+        r_AFTR_DOMAIN="gw.transix.jp"
+    else
+        # 2. xpass can be resolved outside but can't ping
+        # http://checkv6.xpass.jp/check_address.php
+        t_XPASS=$(get_AAAA_record "dgw.xpass.jp")
+        if check_ipv6_reachability $t_XPASS; then
+            r_TYPE="ds-lite"
+            r_AFTR=$t_XPASS
+            r_AFTR_DOMAIN="dgw.xpass.jp"
+        else
+            # 3. v6connect can't be resolved outside
+            # curl http://route6.asahi-net.jp/v1/address
+            t_ASAHI=$(get_AAAA_record "dslite.v6connect.net")
+            if [ -n "$t_ASAHI" ]; then
+                r_TYPE="ds-lite"
+                r_AFTR=$t_ASAHI
+                r_AFTR_DOMAIN="dslite.v6connect.net"
+            fi
+        fi
+    fi
+    echo $r_AFTR
+}
+
+set_interface() {
+    current_proto=$(uci get network.${h_TUNNEL_INTERFACE}.proto 2>/dev/null)
+    current_tunlink=$(uci get network.${h_TUNNEL_INTERFACE}.tunlink 2>/dev/null)
+    current_mtu=$(uci get network.${h_TUNNEL_INTERFACE}.mtu 2>/dev/null)
+    current_zone_index=$(uci show firewall | grep -E "firewall.@zone\[[0-9]+\].network=.*'$h_TUNNEL_INTERFACE'" | sed -n "s/.*@zone\[\([0-9]\+\)\].*/\1/p")
+    new_zone_index=$(uci show firewall | grep -E "firewall.@zone\[[0-9]+\].name='$h_TUNNEL_INTERFACE_zone'" | sed -n "s/.*@zone\[\([0-9]\+\)\].*/\1/p")
+
+    if [ "$r_TYPE" = 'ds-lite' ]; then
+        if [ -z "$r_AFTR" ] || [ -z "$h_TUNNEL_INTERFACE" ] || [ -z "$h_TUNNEL_INTERFACE_MTU" ] || [ -z "$h_UPLINK_INTERFACE" ]; then
+            echo "Failed to retrieve one or more configuration values"
+            exit 1
+        fi
+        current_peeraddrdomain=$(uci get network.${h_TUNNEL_INTERFACE}.peeraddrdomain 2>/dev/null)
+        if [ "$current_peeraddrdomain" != "$r_AFTR_DOMAIN" ] ||
+           [ "$current_tunlink" != "$h_UPLINK_INTERFACE" ] ||
+           [ "$current_proto" != 'dslite' ] ||
+           [ "$current_mtu" != "$h_TUNNEL_INTERFACE_MTU" ]; then
+            uci batch <<EOF
+set network.${h_TUNNEL_INTERFACE}=interface
+set network.${h_TUNNEL_INTERFACE}.proto='dslite'
+set network.${h_TUNNEL_INTERFACE}.peeraddr='${r_AFTR}'
+set network.${h_TUNNEL_INTERFACE}.peeraddrdomain='${r_AFTR_DOMAIN}'
+set network.${h_TUNNEL_INTERFACE}.tunlink='${h_UPLINK_INTERFACE}'
+set network.${h_TUNNEL_INTERFACE}.mtu='${h_TUNNEL_INTERFACE_MTU}'
+set network.${h_TUNNEL_INTERFACE}.encaplimit='ignore'
+EOF
+            uci delete network.${h_TUNNEL_INTERFACE}.device 2>/dev/null
+            if [ "$new_zone_index" != "$current_zone_index" ]; then
+                uci del_list firewall.@zone[$current_zone_index].network="$h_TUNNEL_INTERFACE" 2>/dev/null
+                uci add_list firewall.@zone[$new_zone_index].network="$h_TUNNEL_INTERFACE" 2>/dev/null
+            fi
+            uci commit
+            ifdown ${h_TUNNEL_INTERFACE}; sleep 2; ifup ${h_TUNNEL_INTERFACE}
+            logger -t fleth "New ds-lite configuration committed ${h_TUNNEL_INTERFACE}=${r_AFTR}"
+        fi
+    elif [ "$r_TYPE" = 'map-e' ]; then
+        current_peeraddr=$(uci get network.${h_TUNNEL_INTERFACE}.peeraddr 2>/dev/null)
+        current_ipaddr=$(uci get network.${h_TUNNEL_INTERFACE}.ipaddr 2>/dev/null)
+        current_ip4prefixlen=$(uci get network.${h_TUNNEL_INTERFACE}.ip4prefixlen 2>/dev/null)
+        current_ip6prefix=$(uci get network.${h_TUNNEL_INTERFACE}.ip6prefix 2>/dev/null)
+        current_ip6prefixlen=$(uci get network.${h_TUNNEL_INTERFACE}.ip6prefixlen 2>/dev/null)
+        current_ealen=$(uci get network.${h_TUNNEL_INTERFACE}.ealen 2>/dev/null)
+        current_psidlen=$(uci get network.${h_TUNNEL_INTERFACE}.psidlen 2>/dev/null)
+        current_offset=$(uci get network.${h_TUNNEL_INTERFACE}.offset 2>/dev/null)
+        current_maptype=$(uci get network.${h_TUNNEL_INTERFACE}.maptype 2>/dev/null)
+        current_legacymap=$(uci get network.${h_TUNNEL_INTERFACE}.legacymap 2>/dev/null)
+        current_psid=$(uci get network.${h_TUNNEL_INTERFACE}.psid 2>/dev/null)
+        r_PSID=$(get_mape_psid "$ipv6_address" "$r_PSIDLEN")
+        if [ "$current_peeraddr" != "$r_PEERADDR" ] ||
+            [ "$current_tunlink" != "$h_UPLINK_INTERFACE" ] ||
+            [ "$current_proto" != 'map' ] ||
+            [ "$current_mtu" != "$h_TUNNEL_INTERFACE_MTU" ] ||
+            [ "$current_maptype" != 'map-e' ] ||
+            [ "$current_legacymap" != '1' ] ||
+            [ "$current_ipaddr" != "$r_IPADDR" ] ||
+            [ "$current_ip4prefixlen" != "$r_IP4PREFIXLEN" ] ||
+            [ "$current_ip6prefix" != "$r_IP6PREFIX" ] ||
+            [ "$current_ip6prefixlen" != "$r_IP6PREFIXLEN" ] ||
+            [ "$current_ealen" != "$r_EALEN" ] ||
+            [ "$current_psidlen" != "$r_PSIDLEN" ] ||
+            [ "$current_psid" != "$r_PSID" ] ||
+            [ "$current_offset" != "$r_OFFSET" ]; then
+            uci batch <<EOF
+set network.${h_TUNNEL_INTERFACE}=interface
+set network.${h_TUNNEL_INTERFACE}.proto='map'
+set network.${h_TUNNEL_INTERFACE}.maptype='map-e'
+set network.${h_TUNNEL_INTERFACE}.peeraddr='${r_PEERADDR}'
+set network.${h_TUNNEL_INTERFACE}.ipaddr='${r_IPADDR}'
+set network.${h_TUNNEL_INTERFACE}.ip4prefixlen='${r_IP4PREFIXLEN}'
+set network.${h_TUNNEL_INTERFACE}.ip6prefix='${r_IP6PREFIX}'
+set network.${h_TUNNEL_INTERFACE}.ip6prefixlen='${r_IP6PREFIXLEN}'
+set network.${h_TUNNEL_INTERFACE}.ealen='${r_EALEN}'
+set network.${h_TUNNEL_INTERFACE}.psidlen='${r_PSIDLEN}'
+set network.${h_TUNNEL_INTERFACE}.psid='${r_PSID}'
+set network.${h_TUNNEL_INTERFACE}.offset='${r_OFFSET}'
+
+set network.${h_TUNNEL_INTERFACE}.tunlink='${h_UPLINK_INTERFACE}'
+set network.${h_TUNNEL_INTERFACE}.mtu='${h_TUNNEL_INTERFACE_MTU}'
+set network.${h_TUNNEL_INTERFACE}.legacymap='1'
+set network.${h_TUNNEL_INTERFACE}.encaplimit='ignore'
+EOF
+            uci delete network.${h_TUNNEL_INTERFACE}.device 2>/dev/null
+            if [ "$new_zone_index" != "$current_zone_index" ]; then
+                uci del_list firewall.@zone[$current_zone_index].network="$h_TUNNEL_INTERFACE" 2>/dev/null
+                uci add_list firewall.@zone[$new_zone_index].network="$h_TUNNEL_INTERFACE" 2>/dev/null
+            fi
+            uci commit
+            ifdown ${h_TUNNEL_INTERFACE}; sleep 2; ifup ${h_TUNNEL_INTERFACE}
+            logger -t fleth "New map-e configuration committed ${h_TUNNEL_INTERFACE}=${r_PEERADDR}"
+        fi
+    elif [ "$new_zone_index" != "$current_zone_index" ]; then
+        uci del_list firewall.@zone[$current_zone_index].network="$h_TUNNEL_INTERFACE" 2>/dev/null
+        uci add_list firewall.@zone[$new_zone_index].network="$h_TUNNEL_INTERFACE" 2>/dev/null
+        uci commit firewall
+    fi
+    if check_interface_proto_invalid ${h_TUNNEL_INTERFACE}; then
+        logger -t fleth "Network Restarting"
+        /etc/init.d/network restart
+    fi
+}
+
+if [ "$1" = "auto" ]; then
+    if [ "$(pgrep -f "fleth auto" | wc -l)" -ge 3 ]; then
+        exit 0
+    fi
+    logger -t fleth "is running $h_ENABLED"
+    if [ "$h_ENABLED" = "1" ]; then
+        get_uplink_interface_ipv6 > /dev/null
+        get_mape_provider > /dev/null
+        if [ "$r_TYPE" = "UNKNOWN" ]; then
+            get_area > /dev/null
+            get_dslite_provider > /dev/null
+        fi
+        if [ "$r_TYPE" = "UNKNOWN" ]; then
+            logger -t fleth "Can't detect network type ${h_UPLINK_INTERFACE}=${ipv6_address}"
+        else
+            set_interface
+            auto_configure_extendprefix
+        fi
+    fi
+
+elif [ "$1" = "mape_status" ]; then
+    get_uplink_interface_ipv6 > /dev/null
+    get_mape_provider
+elif [ "$1" = "get_area" ]; then
+    get_area > /dev/null
+    echo ${e_AREA}
+elif [ "$1" = "get_dslite_provider" ]; then
+    get_area > /dev/null
+    get_dslite_provider > /dev/null
+    echo $r_AFTR_DOMAIN
+elif [ "$1" = "pending_status" ]; then
+    get_pending_status
+elif [ "$1" = "get_prefix_length" ]; then
+    prefix_len=$(get_uplink_prefix_length)
+    if [ -n "$prefix_len" ]; then
+        echo "/$prefix_len"
+    else
+        echo "UNKNOWN"
+    fi
+elif [ "$1" = "check_alignment" ]; then
+    check_prefix_alignment "$2"
+elif [ "$1" = "auto_setup_ipv6" ]; then
+    auto_setup_ipv6_mode
+elif [ "$1" = "mapsh_status" ]; then
+    # Check if map.sh is fleth patched, original backup, or an unknown third-party version
+    if [ -f "$FLETH_MAPSH_PATH" ] && cmp -s "$MAPSH_PATH" "$FLETH_MAPSH_PATH"; then
+        echo "patched"
+    elif [ -f "$MAPSH_BACKUP_PATH" ] && cmp -s "$MAPSH_PATH" "$MAPSH_BACKUP_PATH"; then
+        echo "original"
+    elif [ ! -f "$MAPSH_BACKUP_PATH" ]; then
+        echo "original"
+    else
+        echo "unknown"
+    fi
+elif [ "$1" = "hook_none.js" || "$1" = "restore_none.js" ]; then
+    if grep -q "fleth-hook.js" /www/luci-static/resources/protocol/none.js 2>/dev/null; then
+        printf "'use strict';'require network';return network.registerProtocol('none',{getI18n:function(){return _('Unmanaged');}});" > /www/luci-static/resources/protocol/none.js
+    fi
+elif [ "$1" = "setup_ipv6_slaac" ]; then
+    # Configure IPv6 SLAAC for NEXT(1Gbps) without Hikari Denwa (/64)
+    logger -t fleth "Starting IPv6 SLAAC configuration"
+
+    # Configure uplink interface settings
+    uci batch <<EOF
+set network.${h_UPLINK_INTERFACE}.proto='dhcpv6'
+set network.${h_UPLINK_INTERFACE}.reqaddress='try'
+set network.${h_UPLINK_INTERFACE}.extendprefix='1'
+del network.${h_UPLINK_INTERFACE}.reqprefix
+del network.${h_UPLINK_INTERFACE}.ip6assign
+set dhcp.${h_UPLINK_INTERFACE}=dhcp
+set dhcp.${h_UPLINK_INTERFACE}.interface='${h_UPLINK_INTERFACE}'
+set dhcp.${h_UPLINK_INTERFACE}.master='1'
+set dhcp.${h_UPLINK_INTERFACE}.ra='relay'
+set dhcp.${h_UPLINK_INTERFACE}.ndp='relay'
+del dhcp.${h_UPLINK_INTERFACE}.dhcpv6
+EOF
+
+    # Configure lan interface for DHCP server with IPv6
+    uci batch <<EOF
+set network.lan.delegate='1'
+set network.lan.ip6assign='64'
+set dhcp.lan=dhcp
+set dhcp.lan.interface='lan'
+set dhcp.lan.leasetime='6h'
+set dhcp.lan.dhcpv4='server'
+set dhcp.lan.ndp='relay'
+set dhcp.lan.ra='server'
+set dhcp.lan.ra_default='2'
+del dhcp.lan.ra_flags
+add_list dhcp.lan.ra_flags='managed-config'
+add_list dhcp.lan.ra_flags='other-config'
+set dhcp.lan.dhcpv6='server'
+EOF
+
+    # Commit changes
+    uci commit network
+    uci commit dhcp
+    logger -t fleth "Restarting lan AND ${h_UPLINK_INTERFACE} interface"
+    ifdown lan; ifup lan &
+    ifdown ${h_UPLINK_INTERFACE}; sleep 2; ifup ${h_UPLINK_INTERFACE}
+    logger -t fleth "Restarting odhcpd"
+    /etc/init.d/odhcpd restart
+    logger -t fleth "IPv6 SLAAC configuration completed successfully"
+    echo "SUCCESS"
+elif [ "$1" = "setup_ipv6_pd" ]; then
+    # Configure IPv6 PD for enterprise or multi-subnet scenarios (/56)
+    logger -t fleth "Starting IPv6 PD configuration"
+
+    uci batch <<EOF
+set network.${h_UPLINK_INTERFACE}.proto='dhcpv6'
+set network.${h_UPLINK_INTERFACE}.reqprefix='auto'
+set network.${h_UPLINK_INTERFACE}.reqaddress='try'
+set network.${h_UPLINK_INTERFACE}.ip6assign='64'
+del network.${h_UPLINK_INTERFACE}.extendprefix
+set network.${h_UPLINK_INTERFACE}.ip6ifaceid='eui64'
+set dhcp.${h_UPLINK_INTERFACE}=dhcp
+set dhcp.${h_UPLINK_INTERFACE}.interface='${h_UPLINK_INTERFACE}'
+set dhcp.${h_UPLINK_INTERFACE}.master='1'
+del dhcp.${h_UPLINK_INTERFACE}.ra
+set dhcp.${h_UPLINK_INTERFACE}.dhcpv6='relay'
+del dhcp.${h_UPLINK_INTERFACE}.ndp
+EOF
+
+    # Configure lan interface for DHCP server with IPv6
+    uci batch <<EOF
+set network.lan.ip6assign='64'
+set network.lan.ip6hint='1'
+set dhcp.lan=dhcp
+set dhcp.lan.interface='lan'
+set dhcp.lan.leasetime='6h'
+set dhcp.lan.dhcpv4='server'
+set dhcp.lan.ra='server'
+set dhcp.lan.ra_default='2'
+del dhcp.lan.ra_flags
+add_list dhcp.lan.ra_flags='managed-config'
+add_list dhcp.lan.ra_flags='other-config'
+set dhcp.lan.dhcpv6='server'
+set dhcp.lan.ra_offlink='1'
+set dhcp.lan.ra_slaac='1'
+del dhcp.lan.ndp
+EOF
+
+    # Commit changes
+    uci commit network
+    uci commit dhcp
+    logger -t fleth "Restarting lan AND ${h_UPLINK_INTERFACE} interface"
+    ifdown lan; ifup lan &
+    ifdown ${h_UPLINK_INTERFACE}; sleep 2; ifup ${h_UPLINK_INTERFACE}
+    logger -t fleth "Restarting odhcpd"
+    /etc/init.d/odhcpd restart
+
+    logger -t fleth "IPv6 PD configuration completed successfully"
+    echo "SUCCESS"
+elif [ "$1" = "set_wan6_clientid" ]; then
+    logger -t fleth "Setting uplink client ID for ${h_UPLINK_INTERFACE}"
+
+    uplink_dev=$(get_uplink_device)
+    if [ -z "$uplink_dev" ]; then
+        echo "ERROR: Unable to determine uplink device"
+        exit 1
+    fi
+
+    uplink_mac=$(get_device_mac "$uplink_dev")
+    if [ -z "$uplink_mac" ]; then
+        echo "ERROR: Unable to read MAC address for $uplink_dev"
+        exit 1
+    fi
+
+    clientid="00030001${uplink_mac}"
+    uci set network.${h_UPLINK_INTERFACE}.clientid="$clientid"
+    uci commit network
+
+    logger -t fleth "Set ${h_UPLINK_INTERFACE} clientid to $clientid (device: $uplink_dev)"
+    restart_uplink_interface
+
+    echo "SUCCESS"
+elif [ "$1" = "patch_map.sh" ]; then
+    if [ ! -f "$MAPSH_BACKUP_PATH" ]; then
+        cp "$MAPSH_PATH" "$MAPSH_BACKUP_PATH"
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to create backup"
+            exit 1
+        fi
+    fi
+
+    if [ ! -f "$FLETH_MAPSH_PATH" ]; then
+        echo "ERROR: fleth map.sh not found"
+        exit 1
+    fi
+
+    cp "$FLETH_MAPSH_PATH" "$MAPSH_PATH"
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to replace file"
+        exit 1
+    fi
+
+    chmod +x "$MAPSH_PATH"
+    echo "SUCCESS"
+elif [ "$1" = "restore_map.sh" ]; then
+    # Restore original map.sh from backup
+    logger -t fleth "Starting map.sh restoration"
+
+    # Check if backup exists
+    if [ ! -f "$MAPSH_BACKUP_PATH" ]; then
+        echo "ERROR: Backup not found"
+        exit 1
+    fi
+
+    mv "$MAPSH_BACKUP_PATH" "$MAPSH_PATH"
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Failed to restore"
+        exit 1
+    fi
+
+    logger -t fleth "map.sh restored successfully"
+    echo "SUCCESS"
+else
+    echo "Flet'h by huggy"
+    echo "Flet'h is a helper that can configure your IPv4 over IPv6 tunnel automatically in Japan."
+    echo ""
+    echo "Usage: fleth <command> [arguments]"
+    echo ""
+    echo "Tunnel Configuration Commands:"
+    echo "  auto                  Configure the tunnel settings based on current state and config."
+    echo ""
+    echo "Status and Detection Commands:"
+    echo "  pending_status        Show if the service is in pending state."
+    echo "  get_area              Show the current area information (EAST/WEST)."
+    echo "  get_dslite_provider   Show the current DS-Lite provider details."
+    echo "  mape_status           Show the current MAP-E provider details."
+    echo "  get_prefix_length     Show the detected IPv6 prefix length (/56 or /64)."
+    echo "  check_alignment [ip]  Check if prefix is aligned for MAP-E/IPIP6 (4th hextet ends with 00)."
+    echo "  mapsh_status          Show if map.sh is patched, original, or unknown."
+    echo ""
+    echo "IPv6 Configuration Commands:"
+    echo "  auto_setup_ipv6       Auto-detect prefix and configure PD (/56) or SLAAC (/64) mode."
+    echo "  setup_ipv6_slaac      Configure IPv6 SLAAC for NEXT(1Gbps) without Hikari Denwa (/64)."
+    echo "  setup_ipv6_pd         Configure IPv6 PD for CROSS(10Gbps) or with Hikari Denwa (/56)."
+    echo "  set_wan6_clientid     Set uplink client ID to 00030001\$MAC and restart uplink."
+    echo ""
+    echo "File Patches:"
+    echo "  patch_map.sh          Patch map.sh with fixed version (backup created if not exists)."
+    echo "  restore_map.sh        Restore original map.sh from backup."
+    echo ""
+    echo "To modify settings, try these examples below:"
+    echo "uci show fleth.global"
+    echo "uci set fleth.global.enabled=1"
+    echo "uci commit"
+    echo ""
+    echo "For more details, consult the documentation:"
+    echo "https://fleth.link/"
+fi

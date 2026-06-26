@@ -1,0 +1,305 @@
+#!/bin/sh
+
+MAPE_PPE="${MAPE_PPE:-/usr/sbin/mape-ppe}"
+MAPE_IFACE="${MAPE_IFACE:-mape}"
+FLETH_FW4="${FLETH_FW4:-/usr/libexec/fleth-fw4}"
+FLETH_DIR="${FLETH_DIR:-/usr/share/fleth}"
+
+firewall_backend() {
+	if command -v nft >/dev/null 2>&1 && nft list chain inet fw4 forward >/dev/null 2>&1; then
+		echo fw4-nft
+		return 0
+	fi
+
+	if command -v iptables-save >/dev/null 2>&1; then
+		echo fw3-iptables
+		return 0
+	fi
+
+	echo none
+}
+
+maybe_delegate_fw4() {
+	local backend cmd
+
+	backend="$(firewall_backend)"
+	[ "$backend" = "fw4-nft" ] || return 1
+	[ -x "$FLETH_FW4" ] || return 1
+
+	cmd="$1"
+	case "$cmd" in
+		backend_status|apply_firewall|reload_firewall|ppe_status|ppe_enable|ppe_disable)
+			return 1
+			;;
+		autoconfigure|configure)
+			exec "$FLETH_FW4" auto
+			;;
+		*)
+			exec "$FLETH_FW4" "$@"
+			;;
+	esac
+}
+
+backend_status() {
+	local backend
+
+	backend="$(firewall_backend)"
+	echo "firewall_backend=$backend"
+	command -v nft >/dev/null 2>&1 && echo "nft=1" || echo "nft=0"
+	nft list chain inet fw4 forward >/dev/null 2>&1 && echo "fw4_table=1" || echo "fw4_table=0"
+	command -v iptables-save >/dev/null 2>&1 && echo "iptables=1" || echo "iptables=0"
+	[ -x /etc/init.d/mape-fw ] && echo "mape_fw=1" || echo "mape_fw=0"
+	[ -x "$FLETH_FW4" ] && echo "fleth_fw4=1" || echo "fleth_fw4=0"
+}
+
+reload_firewall() {
+	case "$(firewall_backend)" in
+		fw4-nft)
+			if [ -x "$FLETH_DIR/firewall.include" ]; then
+				"$FLETH_DIR/firewall.include"
+			elif [ -x /etc/init.d/firewall ]; then
+				/etc/init.d/firewall reload
+			fi
+			;;
+		fw3-iptables)
+			[ -x /etc/init.d/mape-fw ] && /etc/init.d/mape-fw reload
+			;;
+	esac
+	echo SUCCESS
+}
+
+mapsh_status() {
+	case "$(firewall_backend)" in
+		fw4-nft)
+			if [ -f /usr/share/fleth/map.sh ] && cmp -s /lib/netifd/proto/map.sh /usr/share/fleth/map.sh; then
+				echo patched
+			elif [ -f /lib/netifd/proto/map.sh.flethbak ] && cmp -s /lib/netifd/proto/map.sh /lib/netifd/proto/map.sh.flethbak; then
+				echo original
+			elif [ ! -f /lib/netifd/proto/map.sh.flethbak ]; then
+				echo original
+			else
+				echo unknown
+			fi
+			;;
+		*)
+			# QWRT uses proto=mape plus iptables/mape-fw, not OpenWrt's map.sh.
+			echo patched
+			;;
+	esac
+}
+
+patch_mapsh() {
+	case "$(firewall_backend)" in
+		fw4-nft)
+			[ -f /usr/share/fleth/map.sh ] || {
+				echo "ERROR: fleth map.sh not found"
+				return 1
+			}
+			if [ ! -f /lib/netifd/proto/map.sh.flethbak ]; then
+				cp /lib/netifd/proto/map.sh /lib/netifd/proto/map.sh.flethbak || {
+					echo "ERROR: Failed to create backup"
+					return 1
+				}
+			fi
+			cp /usr/share/fleth/map.sh /lib/netifd/proto/map.sh || {
+				echo "ERROR: Failed to replace file"
+				return 1
+			}
+			chmod +x /lib/netifd/proto/map.sh
+			;;
+		*)
+			logger -t fleth "fw3 backend selected; map.sh patch is not required"
+			;;
+	esac
+	echo SUCCESS
+}
+
+restore_mapsh() {
+	case "$(firewall_backend)" in
+		fw4-nft)
+			[ -f /lib/netifd/proto/map.sh.flethbak ] || {
+				echo "ERROR: Backup not found"
+				return 1
+			}
+			mv /lib/netifd/proto/map.sh.flethbak /lib/netifd/proto/map.sh || {
+				echo "ERROR: Failed to restore"
+				return 1
+			}
+			chmod +x /lib/netifd/proto/map.sh
+			;;
+		*)
+			logger -t fleth "fw3 backend selected; map.sh restore is not required"
+			;;
+	esac
+	echo SUCCESS
+}
+
+state_blob() {
+	"$MAPE_PPE" state 2>/dev/null
+}
+
+state_get() {
+	local key="$1"
+	printf '%s\n' "$STATE" | sed -n "s/^${key}=//p" | head -n 1
+}
+
+prefix_len() {
+	local len
+
+	len="$(state_get mape_ip6prefixlen)"
+	[ -n "$len" ] || len="$(uci -q get network.${MAPE_IFACE}.pd_prefix 2>/dev/null | sed -n 's#^.*/\([0-9][0-9]*\)$#\1#p')"
+	[ -n "$len" ] && printf '/%s\n' "$len" || printf 'UNKNOWN\n'
+}
+
+get_area() {
+	local status
+
+	status="$(ifstatus "$(uci -q get network.${MAPE_IFACE}.tunlink 2>/dev/null || echo wan6)" 2>/dev/null)"
+	if printf '%s\n' "$status" | grep -q 'flets-east.jp'; then
+		echo EAST
+	elif printf '%s\n' "$status" | grep -q 'flets-west.jp'; then
+		echo WEST
+	else
+		echo UNKNOWN
+	fi
+}
+
+mape_status() {
+	local provider
+
+	STATE="$(state_blob)"
+	provider="$(state_get mape_provider)"
+	if [ -z "$provider" ]; then
+		echo UNKNOWN
+		return 0
+	fi
+
+	printf '%s\n' "$provider"
+	printf '%s\n' "$(state_get mape_ipv4)"
+	printf '%s\n' "$(state_get mape_peeraddr)"
+	printf '%s\n' "$(state_get mape_ipv4)"
+	printf '%s\n' "$(state_get mape_ip4prefixlen)"
+	printf '%s\n' "$(state_get mape_ip6prefix)"
+	printf '%s\n' "$(state_get mape_ip6prefixlen)"
+	printf '%s\n' "$(state_get mape_ealen)"
+	printf '%s\n' "$(state_get mape_psidlen)"
+	printf '%s\n' "$(state_get mape_offset)"
+	printf '%s\n' "$(state_get mape_map_ports)"
+}
+
+check_alignment() {
+	local pd hextet
+
+	pd="$(uci -q get network.${MAPE_IFACE}.pd_prefix 2>/dev/null)"
+	[ -n "$pd" ] || return 0
+	hextet="$(printf '%s\n' "$pd" | cut -d: -f4)"
+	case "$hextet" in
+		??00|??) echo ALIGNED ;;
+		*) echo "NOT_ALIGNED:$hextet" ;;
+	esac
+}
+
+setup_ipv6_slaac() {
+	uci set network.lan.ip6assign='64'
+	uci commit network
+	echo SUCCESS
+}
+
+setup_ipv6_pd() {
+	uci set network.lan.ip6assign='60'
+	uci commit network
+	echo SUCCESS
+}
+
+set_wan6_clientid() {
+	# QWRT's working wan6 DHCPv6 client is already kept as-is here.
+	echo SUCCESS
+}
+
+ensure_fleth_config() {
+	uci -q get fleth.global >/dev/null || uci set fleth.global='fleth'
+	uci -q get fleth.global.enabled >/dev/null || uci set fleth.global.enabled='1'
+	uci -q get fleth.global.interface >/dev/null || uci set fleth.global.interface="$MAPE_IFACE"
+	uci -q get fleth.global.interface6 >/dev/null || uci set fleth.global.interface6="$(uci -q get network.${MAPE_IFACE}.tunlink 2>/dev/null || echo wan6)"
+	uci -q get fleth.global.interface_zone >/dev/null || uci set fleth.global.interface_zone='wan'
+	uci -q get fleth.global.mtu >/dev/null || uci set fleth.global.mtu="$(uci -q get network.${MAPE_IFACE}.mtu 2>/dev/null || echo 1460)"
+	uci -q get fleth.global.prefer_slaac >/dev/null || uci set fleth.global.prefer_slaac='1'
+	uci -q get fleth.global.tunnel_activation >/dev/null || uci set fleth.global.tunnel_activation='1'
+	uci commit fleth
+}
+
+case "$1" in
+	backend_status)
+		backend_status
+		;;
+	apply_firewall|reload_firewall)
+		reload_firewall
+		;;
+	get_area)
+		maybe_delegate_fw4 "$@"
+		get_area
+		;;
+	mape_status)
+		maybe_delegate_fw4 "$@"
+		mape_status
+		;;
+	get_prefix_length)
+		maybe_delegate_fw4 "$@"
+		STATE="$(state_blob)"
+		prefix_len
+		;;
+	mapsh_status)
+		maybe_delegate_fw4 "$@"
+		mapsh_status
+		;;
+	pending_status)
+		maybe_delegate_fw4 "$@"
+		echo
+		;;
+	get_dslite_provider)
+		maybe_delegate_fw4 "$@"
+		echo UNKNOWN
+		;;
+	check_alignment)
+		maybe_delegate_fw4 "$@"
+		check_alignment
+		;;
+	setup_ipv6_slaac)
+		maybe_delegate_fw4 "$@"
+		setup_ipv6_slaac
+		;;
+	setup_ipv6_pd)
+		maybe_delegate_fw4 "$@"
+		setup_ipv6_pd
+		;;
+	set_wan6_clientid)
+		maybe_delegate_fw4 "$@"
+		set_wan6_clientid
+		;;
+	patch_map.sh)
+		maybe_delegate_fw4 "$@"
+		patch_mapsh
+		;;
+	restore_map.sh)
+		maybe_delegate_fw4 "$@"
+		restore_mapsh
+		;;
+	auto|autoconfigure|configure)
+		maybe_delegate_fw4 "$@"
+		ensure_fleth_config
+		"$MAPE_PPE" autoconfigure
+		;;
+	ppe_status)
+		"$MAPE_PPE" state
+		;;
+	ppe_enable)
+		"$MAPE_PPE" enable
+		;;
+	ppe_disable)
+		"$MAPE_PPE" disable
+		;;
+	*)
+		echo "Usage: fleth {backend_status|apply_firewall|reload_firewall|get_area|mape_status|get_prefix_length|mapsh_status|pending_status|get_dslite_provider|check_alignment|setup_ipv6_slaac|setup_ipv6_pd|set_wan6_clientid|patch_map.sh|restore_map.sh|auto|autoconfigure|ppe_status|ppe_enable|ppe_disable}" >&2
+		exit 2
+		;;
+esac

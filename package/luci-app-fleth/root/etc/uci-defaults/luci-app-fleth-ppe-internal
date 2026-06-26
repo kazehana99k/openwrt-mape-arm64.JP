@@ -1,0 +1,12 @@
+#!/bin/sh
+
+[ -f /etc/config/mape_ppe ] || touch /etc/config/mape_ppe
+
+if ! uci -q get mape_ppe.global >/dev/null; then
+	uci set mape_ppe.global='mape_ppe'
+	uci set mape_ppe.global.enabled='1'
+	uci commit mape_ppe
+fi
+
+chmod 755 /usr/sbin/mape-ppe /usr/sbin/mape-ppe-status /usr/sbin/mape-ppe-enable /usr/sbin/mape-ppe-disable /etc/hotplug.d/iface/38-mape-ppe 2>/dev/null
+exit 0

@@ -1,0 +1,17 @@
+#!/bin/sh
+
+[ "$INTERFACE" = "$(uci -q get network.mape.tunlink 2>/dev/null || echo wan6)" ] || exit 0
+
+wan_dev="$(uci -q get network.mape.wan_dev 2>/dev/null || echo eth4)"
+
+case "$ACTION" in
+	ifup)
+		[ -e "/proc/sys/net/ipv6/conf/$wan_dev/disable_ipv6" ] && echo 0 > "/proc/sys/net/ipv6/conf/$wan_dev/disable_ipv6"
+		[ -e "/proc/sys/net/ipv6/conf/$wan_dev/accept_ra" ] && echo 2 > "/proc/sys/net/ipv6/conf/$wan_dev/accept_ra"
+		sleep 2
+		ifup mape
+		;;
+	ifdown)
+		ifdown mape
+		;;
+esac

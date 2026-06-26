@@ -19,13 +19,26 @@ cd "$ROOT"
 
 OUT_DIR="build"
 TARBALL="$OUT_DIR/openwrt-mape-arm64.tar.gz"
+STAGE="$OUT_DIR/release-root"
 
 mkdir -p "$OUT_DIR"
 rm -f "$TARBALL"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
 
 # Build the tarball. Files are stored relative to / so a `tar -C / -x` on
 # the router puts everything in the right place.
-tar -C package/mape/files -czf "$TARBALL" .
+cp -a package/mape/files/. "$STAGE"/
+
+if [ -d package/luci-app-fleth/root ]; then
+    cp -a package/luci-app-fleth/root/. "$STAGE"/
+fi
+if [ -d package/luci-app-fleth/htdocs ]; then
+    mkdir -p "$STAGE/www"
+    cp -a package/luci-app-fleth/htdocs/. "$STAGE/www"/
+fi
+
+tar -C "$STAGE" -czf "$TARBALL" .
 
 echo "Built: $TARBALL"
 echo "Size:  $(du -h "$TARBALL" | cut -f1)"

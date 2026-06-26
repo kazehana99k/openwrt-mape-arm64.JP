@@ -1,0 +1,11 @@
+#!/bin/sh
+
+wan_dev="$(uci -q get network.mape.wan_dev 2>/dev/null || uci -q get network.wan6.device 2>/dev/null || echo eth4)"
+
+case "$INTERFACE $DEVICE $DEVICENAME" in
+	*"$wan_dev"*) ;;
+	*) exit 0 ;;
+esac
+
+[ -e "/proc/sys/net/ipv6/conf/$wan_dev/disable_ipv6" ] && echo 0 > "/proc/sys/net/ipv6/conf/$wan_dev/disable_ipv6"
+[ -e "/proc/sys/net/ipv6/conf/$wan_dev/accept_ra" ] && echo 2 > "/proc/sys/net/ipv6/conf/$wan_dev/accept_ra"

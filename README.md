@@ -50,6 +50,10 @@ ipip6 トンネル + SNAT + ポート転送を構築する。
 - **LuCI 統合** —— ネットワーク → インターフェース 一覧にプロトコル
   「MAP-E (custom)」として表示され、編集ページでは設定フォームと
   「自動検出されたパラメーター」プレビューパネルが利用可能
+- **Flet'h 互換 LuCI helper** —— ネットワーク → Flet'h Configuration から
+  MAP-E 自動検出、QWrt `proto=mape` への注入、Qualcomm PPE ipip6 加速の
+  ON/OFF が可能。fw4+nft 環境では原版 Flet'h の nft backend、fw3+iptables
+  環境では本パッケージの `mape-fw` backend を自動選択
 - **iptables のみ**で動作、nftables は不要、fw3 と互換
 
 ## スクリーンショット

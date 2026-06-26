@@ -1,0 +1,19 @@
+{
+	"luci-app-fleth": {
+		"description": "Grant access for luci-app-fleth",
+		"read": {
+			"cgi-io": [ "exec" ],
+			"file": {
+				"/usr/sbin/fleth": [ "exec" ]
+			},
+			"uci": [ "fleth", "network", "mape_ppe" ]
+		},
+		"write": {
+			"cgi-io": [ "exec" ],
+			"file": {
+				"/usr/sbin/fleth": [ "exec" ]
+			},
+			"uci": [ "fleth", "network", "mape_ppe" ]
+		}
+	}
+}

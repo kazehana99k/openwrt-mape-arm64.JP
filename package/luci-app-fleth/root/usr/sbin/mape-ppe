@@ -1,0 +1,592 @@
+#!/bin/sh
+
+PPE_ROOT="/sys/kernel/debug/qca-nss-ppe"
+TUN_STATS="$PPE_ROOT/ppe_tun/stats"
+VP_STATS="$PPE_ROOT/ppe_vp/vp_stats"
+ECM_IPV4="/sys/kernel/debug/ecm/ecm_ppe_ipv4/accelerated_count"
+ACCEL_IPIP6="$PPE_ROOT/ppe_tun/accel_mode/ipip6"
+MOD_TUN="qca_nss_ppe_tun"
+MOD_TUNIPIP6="qca_nss_ppe_tunipip6"
+MODFILE_TUN="/etc/modules.d/32-qca-nss-ppe-tun"
+MODFILE_TUNIPIP6="/etc/modules.d/33-qca-nss-ppe-tunipip6"
+MAPE_IFACE="${MAPE_IFACE:-mape}"
+MAPE_STATE="${MAPE_STATE_DIR:-/var/run}/mape.${MAPE_IFACE}.json"
+MAPE_CALC="${MAPE_CALC:-/usr/bin/mape-calc}"
+DEFAULT_UPLINK="${MAPE_UPLINK:-wan6}"
+DEFAULT_WAN_DEV="${MAPE_WAN_DEV:-eth4}"
+DEFAULT_MTU="${MAPE_MTU:-1460}"
+DEFAULT_SNAT_MODE="${MAPE_SNAT_MODE:-statistic}"
+
+is_loaded() {
+	grep -q "^$1 " /proc/modules 2>/dev/null
+}
+
+is_autoloaded() {
+	[ -f "$1" ] && [ -s "$1" ]
+}
+
+accel_ipip6_enabled() {
+	grep -q "enabled" "$ACCEL_IPIP6" 2>/dev/null
+}
+
+mape_l3dev() {
+	ifstatus "$MAPE_IFACE" 2>/dev/null | jsonfilter -e '@.l3_device' 2>/dev/null | head -n 1
+}
+
+mape_ipv4() {
+	ifstatus "$MAPE_IFACE" 2>/dev/null | jsonfilter -e '@["ipv4-address"][0].address' 2>/dev/null | head -n 1
+}
+
+mape_uci() {
+	uci -q get "network.${MAPE_IFACE}.$1" 2>/dev/null
+}
+
+mape_state_value() {
+	[ -f "$MAPE_STATE" ] || return 0
+	jsonfilter -i "$MAPE_STATE" -e "@.$1" 2>/dev/null | head -n 1
+}
+
+mape_pd_prefix() {
+	mape_uci pd_prefix
+}
+
+mape_pd_prefix_len() {
+	mape_pd_prefix | sed -n 's#^.*/\([0-9][0-9]*\)$#\1#p'
+}
+
+mape_port_sets() {
+	local pd json i start end out
+
+	pd="$(mape_pd_prefix)"
+	[ -n "$pd" ] || return 0
+	[ -x "$MAPE_CALC" ] || return 0
+
+	json="$("$MAPE_CALC" compute "$pd" 2>/dev/null)" || return 0
+	i=0
+	while start="$(printf '%s\n' "$json" | jsonfilter -e "@.port_sets[$i].start" 2>/dev/null)" && [ -n "$start" ]; do
+		end="$(printf '%s\n' "$json" | jsonfilter -e "@.port_sets[$i].end" 2>/dev/null)"
+		[ -n "$end" ] || break
+		out="${out:+$out }$start-$end"
+		i=$((i + 1))
+	done
+	printf '%s\n' "$out"
+}
+
+mape_up() {
+	ifstatus "$MAPE_IFACE" 2>/dev/null | jsonfilter -e '@.up' 2>/dev/null | grep -q true
+}
+
+mape_wan_dev() {
+	mape_uci wan_dev || echo eth4
+}
+
+json_get() {
+	local json="$1" expr="$2"
+	printf '%s\n' "$json" | jsonfilter -e "$expr" 2>/dev/null | head -n 1
+}
+
+iface_status() {
+	ifstatus "$1" 2>/dev/null
+}
+
+iface_device() {
+	local iface="$1" status dev
+
+	status="$(iface_status "$iface")"
+	if [ -n "$status" ]; then
+		dev="$(json_get "$status" '@.device')"
+		[ -n "$dev" ] || dev="$(json_get "$status" '@.l3_device')"
+	fi
+	[ -n "$dev" ] || dev="$(uci -q get "network.${iface}.device" 2>/dev/null)"
+	[ -n "$dev" ] || dev="$(uci -q get "network.${iface}.ifname" 2>/dev/null)"
+
+	printf '%s\n' "$dev"
+}
+
+iface_pd_prefix() {
+	local iface="$1" status addr mask
+
+	status="$(iface_status "$iface")"
+	[ -n "$status" ] || return 0
+
+	addr="$(json_get "$status" '@["ipv6-prefix"][0].address')"
+	mask="$(json_get "$status" '@["ipv6-prefix"][0].mask')"
+	if [ -n "$addr" ] && [ -n "$mask" ]; then
+		printf '%s/%s\n' "$addr" "$mask"
+		return 0
+	fi
+
+	addr="$(json_get "$status" '@["ipv6-address"][0].address')"
+	mask="$(json_get "$status" '@["ipv6-address"][0].mask')"
+	if [ -n "$addr" ] && [ -n "$mask" ]; then
+		printf '%s/%s\n' "$addr" "$mask"
+		return 0
+	fi
+
+	json_get "$status" '@.route[0].source'
+}
+
+detect_uplink_iface() {
+	local iface current
+
+	for iface in "$MAPE_UPLINK" "$(mape_uci tunlink)" "$DEFAULT_UPLINK"; do
+		[ -n "$iface" ] || continue
+		if iface_status "$iface" >/dev/null || uci -q get "network.${iface}.proto" >/dev/null; then
+			printf '%s\n' "$iface"
+			return 0
+		fi
+	done
+
+	for current in $(ubus list 'network.interface.*' 2>/dev/null | sed 's/^network\.interface\.//'); do
+		[ "$current" = "$MAPE_IFACE" ] && continue
+		if [ -n "$(iface_pd_prefix "$current")" ]; then
+			printf '%s\n' "$current"
+			return 0
+		fi
+	done
+
+	printf '%s\n' "$DEFAULT_UPLINK"
+}
+
+detect_wan_dev() {
+	local iface="$1" dev
+
+	dev="$(iface_device "$iface")"
+	[ -n "$dev" ] || dev="$(mape_uci wan_dev)"
+	[ -n "$dev" ] || dev="$(uci -q get "network.${DEFAULT_UPLINK}.device" 2>/dev/null)"
+	[ -n "$dev" ] || dev="$DEFAULT_WAN_DEV"
+
+	printf '%s\n' "$dev"
+}
+
+calc_params() {
+	local pd="$1"
+
+	[ -x "$MAPE_CALC" ] || {
+		echo "mape-calc not found: $MAPE_CALC" >&2
+		return 1
+	}
+	"$MAPE_CALC" detect "$pd" 2>/tmp/mape-ppe-calc.err
+}
+
+calc_port_sets() {
+	local json="$1" i start end out
+
+	i=0
+	while start="$(json_get "$json" "@.port_sets[$i].start")" && [ -n "$start" ]; do
+		end="$(json_get "$json" "@.port_sets[$i].end")"
+		[ -n "$end" ] || break
+		out="${out:+$out }$start-$end"
+		i=$((i + 1))
+	done
+	printf '%s\n' "$out"
+}
+
+detect_json() {
+	local uplink="$1" pd json
+
+	[ -n "$uplink" ] || uplink="$(detect_uplink_iface)"
+	pd="$(iface_pd_prefix "$uplink")"
+	[ -n "$pd" ] || return 1
+	json="$(calc_params "$pd")" || return 1
+	printf '%s\n' "$json"
+}
+
+print_detect() {
+	local uplink wan_dev pd json err
+
+	uplink="$(detect_uplink_iface)"
+	wan_dev="$(detect_wan_dev "$uplink")"
+	pd="$(iface_pd_prefix "$uplink")"
+
+	echo "detect_uplink=$uplink"
+	echo "detect_wan_dev=$wan_dev"
+
+	if [ -z "$pd" ]; then
+		echo "detect_status=no_prefix"
+		echo "detect_message=No IPv6 prefix detected on $uplink"
+		return 1
+	fi
+
+	echo "detect_pd_prefix=$pd"
+	json="$(calc_params "$pd")"
+	if [ $? -ne 0 ] || [ -z "$json" ]; then
+		err="$(cat /tmp/mape-ppe-calc.err 2>/dev/null)"
+		echo "detect_status=calc_failed"
+		echo "detect_message=${err:-mape-calc failed for $pd}"
+		return 1
+	fi
+
+	echo "detect_status=ok"
+	echo "detect_rule_id=$(json_get "$json" '@.rule_id')"
+	echo "detect_provider=$(json_get "$json" '@.isp_name')"
+	echo "detect_ipv4=$(json_get "$json" '@.ipv4')"
+	echo "detect_peeraddr=$(json_get "$json" '@.br_ipv6')"
+	echo "detect_ce_ipv6=$(json_get "$json" '@.ce_ipv6')"
+	echo "detect_ip4prefixlen=$(json_get "$json" '@.v4_prefix_len')"
+	echo "detect_ealen=$(json_get "$json" '@.ea_len')"
+	echo "detect_psid=$(json_get "$json" '@.psid')"
+	echo "detect_psidlen=$(json_get "$json" '@.psid_len')"
+	echo "detect_offset=$(json_get "$json" '@.psid_offset')"
+	echo "detect_map_ports=$(calc_port_sets "$json")"
+}
+
+mape_tunnel_local() {
+	local dev="$1"
+	[ -n "$dev" ] || return 0
+	ip -d link show "$dev" 2>/dev/null | sed -n 's/.*link\/tunnel6 \([^ ]*\) peer .*/\1/p' | head -n 1
+}
+
+ppe_active_tunnels() {
+	awk -F: '/Active tunnels/ { gsub(/[ \t]/, "", $2); print $2; exit }' "$TUN_STATS" 2>/dev/null
+}
+
+ppe_vp_for_dev() {
+	local dev="$1"
+	[ -n "$dev" ] || return 0
+	awk -v dev="$dev" '
+		$1 == "dev:" && $2 == dev { in_dev = 1; next }
+		in_dev && $1 == "VP" && $2 == "number" { print $3; exit }
+		$1 == "dev:" { in_dev = 0 }
+	' "$TUN_STATS" 2>/dev/null
+}
+
+print_state() {
+	local dev vp active ecm
+	local pd pd_len
+
+	dev="$(mape_l3dev)"
+	[ -n "$dev" ] || dev="$MAPE_IFACE"
+	vp="$(ppe_vp_for_dev "$dev")"
+	active="$(ppe_active_tunnels)"
+	ecm="$(cat "$ECM_IPV4" 2>/dev/null)"
+	pd="$(mape_pd_prefix)"
+	pd_len="$(mape_pd_prefix_len)"
+
+	echo "enabled=$(uci -q get mape_ppe.global.enabled 2>/dev/null || echo 0)"
+	accel_ipip6_enabled && echo "accel_ipip6=1" || echo "accel_ipip6=0"
+	is_autoloaded "$MODFILE_TUN" && echo "autoload_tun=1" || echo "autoload_tun=0"
+	is_autoloaded "$MODFILE_TUNIPIP6" && echo "autoload_tunipip6=1" || echo "autoload_tunipip6=0"
+	is_loaded "$MOD_TUN" && echo "loaded_tun=1" || echo "loaded_tun=0"
+	is_loaded "$MOD_TUNIPIP6" && echo "loaded_tunipip6=1" || echo "loaded_tunipip6=0"
+	mape_up && echo "mape_up=1" || echo "mape_up=0"
+	echo "mape_dev=$dev"
+	echo "mape_ipv4=$(mape_ipv4)"
+	echo "mape_provider=$(mape_state_value isp_name)"
+	echo "mape_rule_id=$(mape_state_value rule_id)"
+	echo "mape_ce_ipv6=$(mape_state_value ce_ipv6)"
+	echo "mape_peeraddr=$(mape_state_value br_ipv6)"
+	echo "mape_ip6prefix=$pd"
+	echo "mape_ip6prefixlen=$pd_len"
+	echo "mape_ip4prefixlen=$(mape_state_value v4_prefix_len)"
+	echo "mape_ealen=$(mape_state_value ea_len)"
+	echo "mape_psid=$(mape_state_value psid)"
+	echo "mape_psidlen=$(mape_state_value psid_len)"
+	echo "mape_offset=$(mape_state_value psid_offset)"
+	echo "mape_map_ports=$(mape_port_sets)"
+	echo "mape_wan_dev=$(mape_wan_dev)"
+	echo "mape_tunlink=$(mape_uci tunlink)"
+	echo "mape_mtu=$(mape_uci mtu)"
+	echo "mape_snat_mode=$(mape_uci snat_mode)"
+	echo "mape_state_file=$MAPE_STATE"
+	echo "ppe_active_tunnels=${active:-0}"
+	echo "ppe_vp=$vp"
+	echo "ecm_ppe_ipv4=${ecm:-0}"
+}
+
+print_status() {
+	local dev vp
+
+	dev="$(mape_l3dev)"
+	[ -n "$dev" ] || dev="$MAPE_IFACE"
+	vp="$(ppe_vp_for_dev "$dev")"
+
+	echo "MAP-E PPE status"
+	echo
+	print_state
+	echo
+	echo "MAP-E interface"
+	ifstatus "$MAPE_IFACE" 2>/dev/null | sed -n '1,120p'
+	echo
+	echo "Tunnel link"
+	ip -d link show "$dev" 2>/dev/null || true
+	echo
+	echo "PPE tunnel"
+	cat "$TUN_STATS" 2>/dev/null || echo "missing: $TUN_STATS"
+	echo
+	echo "PPE VP"
+	if [ -n "$vp" ]; then
+		sed -n "/VP Port: $vp/,+28p" "$VP_STATS" 2>/dev/null
+	else
+		sed -n "/Netdev name: $dev/,+28p" "$VP_STATS" 2>/dev/null
+	fi
+	echo
+	echo "ECM PPE IPv4 accelerated_count"
+	cat "$ECM_IPV4" 2>/dev/null || echo 0
+}
+
+ensure_config() {
+	uci -q get mape_ppe.global >/dev/null || uci set mape_ppe.global='mape_ppe'
+}
+
+sanitize_uci_name() {
+	printf '%s\n' "$1" | sed 's/[^A-Za-z0-9_]/_/g'
+}
+
+ensure_device_ipv6() {
+	local dev="$1" sec name
+
+	[ -n "$dev" ] || return 1
+	sec="$(uci show network 2>/dev/null | sed -n "s/^\(network\.[^.]*\)\.name='$dev'$/\1/p" | head -n 1)"
+	if [ -z "$sec" ]; then
+		name="mape_$(sanitize_uci_name "$dev")_dev"
+		uci set "network.$name=device"
+		uci set "network.$name.name=$dev"
+		sec="network.$name"
+	fi
+
+	uci set "$sec.ipv6=1"
+	[ -e "/proc/sys/net/ipv6/conf/$dev/disable_ipv6" ] && echo 0 > "/proc/sys/net/ipv6/conf/$dev/disable_ipv6"
+	[ -e "/proc/sys/net/ipv6/conf/$dev/accept_ra" ] && echo 2 > "/proc/sys/net/ipv6/conf/$dev/accept_ra"
+	ip link set "$dev" up 2>/dev/null || true
+}
+
+remove_bridge_port() {
+	local dev="$1" sec
+
+	[ -n "$dev" ] || return 0
+	for sec in $(uci show network 2>/dev/null | sed -n "s/^\(network\.[^.]*\)\.type='bridge'$/\1/p"); do
+		uci -q del_list "$sec.ports=$dev"
+	done
+	ip link set "$dev" nomaster 2>/dev/null || true
+}
+
+configure_wan6() {
+	local uplink="$1" dev="$2" action="$3"
+
+	ensure_device_ipv6 "$dev"
+	remove_bridge_port "$dev"
+
+	uci -q get "network.${uplink}" >/dev/null || uci set "network.${uplink}=interface"
+	uci set "network.${uplink}.proto=dhcpv6"
+	uci set "network.${uplink}.device=$dev"
+	uci set "network.${uplink}.reqaddress=try"
+	uci set "network.${uplink}.reqprefix=auto"
+	uci set "network.${uplink}.norelease=1"
+	uci commit network
+
+	[ "$action" = "start" ] && ifup "$uplink" 2>/dev/null || true
+}
+
+wait_uplink_pd() {
+	local uplink="$1" i pd
+
+	i=0
+	while [ "$i" -lt 35 ]; do
+		pd="$(iface_pd_prefix "$uplink")"
+		if [ -n "$pd" ]; then
+			printf '%s\n' "$pd"
+			return 0
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+	return 1
+}
+
+configure_mape_interface() {
+	local uplink="$1" dev="$2" pd="$3" pd_len
+
+	pd_len="${pd##*/}"
+
+	uci -q get "network.${MAPE_IFACE}" >/dev/null || uci set "network.${MAPE_IFACE}=interface"
+	uci set "network.${MAPE_IFACE}.proto=mape"
+	uci set "network.${MAPE_IFACE}.pd_prefix=$pd"
+	uci set "network.${MAPE_IFACE}.wan_dev=$dev"
+	uci set "network.${MAPE_IFACE}.mtu=$DEFAULT_MTU"
+	uci set "network.${MAPE_IFACE}.tunlink=$uplink"
+	uci set "network.${MAPE_IFACE}.snat_mode=$DEFAULT_SNAT_MODE"
+	uci -q delete "network.${MAPE_IFACE}.ip6prefix"
+	uci -q delete "network.${MAPE_IFACE}.ip6prefixlen"
+	uci -q delete "network.${MAPE_IFACE}.ipaddr"
+	uci -q delete "network.${MAPE_IFACE}.ip4prefixlen"
+	uci -q delete "network.${MAPE_IFACE}.peeraddr"
+	uci -q delete "network.${MAPE_IFACE}.ealen"
+	uci -q delete "network.${MAPE_IFACE}.psidlen"
+	uci -q delete "network.${MAPE_IFACE}.offset"
+
+	case "$pd_len" in
+		56) uci set network.lan.ip6assign='60' ;;
+		64) uci set network.lan.ip6assign='64' ;;
+	esac
+
+	uci commit network
+}
+
+mape_config_matches() {
+	local uplink="$1" dev="$2" pd="$3"
+
+	[ "$(uci -q get "network.${MAPE_IFACE}.proto" 2>/dev/null)" = "mape" ] || return 1
+	[ "$(mape_uci pd_prefix)" = "$pd" ] || return 1
+	[ "$(mape_uci wan_dev)" = "$dev" ] || return 1
+	[ "$(mape_uci tunlink)" = "$uplink" ] || return 1
+	return 0
+}
+
+apply_ppe_mode_no_restart() {
+	local enabled
+
+	ensure_config
+	enabled="$(uci -q get mape_ppe.global.enabled 2>/dev/null)"
+	[ -n "$enabled" ] || enabled=1
+
+	printf '%s\n' 'qca-nss-ppe-tun' > "$MODFILE_TUN"
+	printf '%s\n' 'qca-nss-ppe-tunipip6' > "$MODFILE_TUNIPIP6"
+	chmod 644 "$MODFILE_TUN" "$MODFILE_TUNIPIP6"
+	modprobe qca-nss-ppe-tun 2>/dev/null || insmod /lib/modules/$(uname -r)/qca-nss-ppe-tun.ko 2>/dev/null
+	modprobe qca-nss-ppe-tunipip6 2>/dev/null || insmod /lib/modules/$(uname -r)/qca-nss-ppe-tunipip6.ko 2>/dev/null
+
+	case "$enabled" in
+		1|on|enabled|true) [ -w "$ACCEL_IPIP6" ] && echo 1 > "$ACCEL_IPIP6" ;;
+		*) [ -w "$ACCEL_IPIP6" ] && echo 0 > "$ACCEL_IPIP6" ;;
+	esac
+}
+
+autoconfigure_mape() {
+	local uplink wan_dev pd json
+
+	ensure_config
+	uplink="$(detect_uplink_iface)"
+	wan_dev="$(detect_wan_dev "$uplink")"
+	[ -n "$wan_dev" ] || {
+		echo "Cannot detect WAN device" >&2
+		return 1
+	}
+
+	pd="$(iface_pd_prefix "$uplink")"
+	if [ -n "$pd" ]; then
+		configure_wan6 "$uplink" "$wan_dev" no-start
+	else
+		configure_wan6 "$uplink" "$wan_dev" start
+		pd="$(wait_uplink_pd "$uplink")" || {
+			echo "Cannot detect IPv6 prefix on $uplink after DHCPv6" >&2
+			return 1
+		}
+	fi
+
+	json="$(calc_params "$pd")" || {
+		cat /tmp/mape-ppe-calc.err >&2 2>/dev/null
+		return 1
+	}
+	[ -n "$json" ] || {
+		echo "mape-calc returned empty result for $pd" >&2
+		return 1
+	}
+
+	apply_ppe_mode_no_restart
+
+	if mape_config_matches "$uplink" "$wan_dev" "$pd" && mape_up; then
+		configure_mape_interface "$uplink" "$wan_dev" "$pd"
+		echo "MAP-E interface already configured"
+	else
+		configure_mape_interface "$uplink" "$wan_dev" "$pd"
+		restart_mape 8
+		echo "MAP-E interface auto configured"
+	fi
+
+	echo "uplink=$uplink"
+	echo "wan_dev=$wan_dev"
+	echo "pd_prefix=$pd"
+	echo "provider=$(json_get "$json" '@.isp_name')"
+	echo "ipv4=$(json_get "$json" '@.ipv4')"
+	echo "peeraddr=$(json_get "$json" '@.br_ipv6')"
+	echo "ppe_enabled=$(uci -q get mape_ppe.global.enabled 2>/dev/null || echo 1)"
+}
+
+restart_mape() {
+	local wait_max="${1:-20}"
+
+	ifdown "$MAPE_IFACE" 2>/dev/null
+	sleep 2
+	ifup "$MAPE_IFACE" 2>/dev/null
+	wait_mape_ready "$wait_max"
+}
+
+wait_mape_ready() {
+	local i dev wan local line
+	local max="${1:-20}"
+
+	wan="$(mape_wan_dev)"
+	i=0
+	while [ "$i" -lt "$max" ]; do
+		dev="$(mape_l3dev)"
+		[ -n "$dev" ] || dev="$MAPE_IFACE"
+		if mape_up && ip route show 2>/dev/null | grep -q "^default dev $dev "; then
+			local="$(mape_tunnel_local "$dev")"
+			if [ -z "$local" ]; then
+				return 0
+			fi
+			line="$(ip -6 addr show dev "$wan" 2>/dev/null | grep -F "$local/128" | head -n 1)"
+			if [ -n "$line" ] && ! echo "$line" | grep -q tentative; then
+				return 0
+			fi
+		fi
+		i=$((i + 1))
+		sleep 1
+	done
+}
+
+enable_ppe() {
+	ensure_config
+	printf '%s\n' 'qca-nss-ppe-tun' > "$MODFILE_TUN"
+	printf '%s\n' 'qca-nss-ppe-tunipip6' > "$MODFILE_TUNIPIP6"
+	chmod 644 "$MODFILE_TUN" "$MODFILE_TUNIPIP6"
+
+	modprobe qca-nss-ppe-tun 2>/dev/null || insmod /lib/modules/$(uname -r)/qca-nss-ppe-tun.ko 2>/dev/null
+	modprobe qca-nss-ppe-tunipip6 2>/dev/null || insmod /lib/modules/$(uname -r)/qca-nss-ppe-tunipip6.ko 2>/dev/null
+	[ -w "$ACCEL_IPIP6" ] && echo 1 > "$ACCEL_IPIP6"
+
+	uci set mape_ppe.global.enabled='1'
+	uci commit mape_ppe
+	restart_mape
+	echo "MAP-E PPE acceleration enabled"
+}
+
+disable_ppe() {
+	ensure_config
+	uci set mape_ppe.global.enabled='0'
+	uci commit mape_ppe
+
+	[ -w "$ACCEL_IPIP6" ] && echo 0 > "$ACCEL_IPIP6"
+	restart_mape
+	echo "MAP-E PPE acceleration disabled; qca tunnel modules remain loaded for stable software tunnel fallback"
+}
+
+case "$1" in
+	state)
+		print_state
+		;;
+	detect)
+		print_detect
+		;;
+	status|"")
+		print_status
+		;;
+	autoconfigure|configure)
+		autoconfigure_mape
+		;;
+	enable)
+		enable_ppe
+		;;
+	disable)
+		disable_ppe
+		;;
+	restart)
+		restart_mape
+		echo "MAP-E restarted"
+		;;
+	*)
+		echo "Usage: mape-ppe {state|detect|status|autoconfigure|enable|disable|restart}" >&2
+		exit 2
+		;;
+esac

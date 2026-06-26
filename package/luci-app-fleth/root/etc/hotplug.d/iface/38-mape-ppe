@@ -1,0 +1,20 @@
+#!/bin/sh
+
+[ "$ACTION" = "ifup" ] || exit 0
+
+case "$INTERFACE" in
+	wan6|mape) ;;
+	*) exit 0 ;;
+esac
+
+enabled="$(uci -q get mape_ppe.global.enabled 2>/dev/null)"
+[ -n "$enabled" ] || enabled=1
+
+path="/sys/kernel/debug/qca-nss-ppe/ppe_tun/accel_mode/ipip6"
+[ -w "$path" ] || exit 0
+
+case "$enabled" in
+	1|on|enabled|true) echo 1 > "$path" ;;
+	*) echo 0 > "$path" ;;
+esac
+

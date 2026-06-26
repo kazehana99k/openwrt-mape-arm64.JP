@@ -63,6 +63,28 @@ chmod +x /lib/netifd/proto/mape.sh \
          /usr/bin/mape-calc \
          /etc/init.d/mape-fw \
          /etc/hotplug.d/iface/40-mape
+chmod +x \
+         /usr/sbin/fleth \
+         /usr/sbin/fleth-map-e.lua \
+         /usr/sbin/mape-ppe \
+         /usr/sbin/mape-ppe-status \
+         /usr/sbin/mape-ppe-enable \
+         /usr/sbin/mape-ppe-disable \
+         /usr/libexec/fleth-fw4 \
+         /usr/share/fleth/firewall.include \
+         /usr/share/fleth/ipip6hp-hotplug.sh \
+         /usr/share/fleth/map.sh \
+         /lib/netifd/proto/ipip6h.sh \
+         /lib/netifd/proto/ipip6hp.sh \
+         /etc/hotplug.d/iface/38-mape-ppe \
+         /etc/hotplug.d/iface/39-mape-wan6 \
+         /etc/hotplug.d/net/10-mape-wan-ipv6
+
+say "Initializing Flet'h LuCI helper defaults..."
+for f in /etc/uci-defaults/luci-app-fleth-*; do
+    [ -f "$f" ] || continue
+    sh "$f" || true
+done
 
 # 6. Sysctl + LuCI ACL
 say "Applying sysctl tuning..."
@@ -88,6 +110,10 @@ NEXT STEPS:
        Name:     mape
        Protocol: MAP-E (custom)
        Fill IPv6 PD prefix, set WAN device (e.g. eth4), Save & Apply
+
+     Or use the Flet'h helper:
+       Network -> Flet'h Configuration
+       Auto Configure tunnel Interface + PPE Acceleration
 
   3. Or via CLI:
      uci set network.mape=interface
