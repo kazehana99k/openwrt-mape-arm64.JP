@@ -671,7 +671,7 @@ return view.extend({
             ui.addNotification(null, E('p', result.stdout || _('Operation completed successfully!')), 'info');
             setTimeout(function () {
               window.location.reload();
-            }, 900);
+            }, 5000);
           } else {
             ui.addNotification(null, E('div', [
               E('p', _('Failed to apply PPE setting:')),

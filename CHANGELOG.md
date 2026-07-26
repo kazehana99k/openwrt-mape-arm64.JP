@@ -1,5 +1,13 @@
 # Changelog
 
+## v0.2.2
+
+- Return immediately from LuCI PPE enable/disable actions and restart MAP-E in
+  the background, avoiding CGI/XHR timeouts.
+- Fail PPE enable with a concrete error when either kernel module or the
+  debugfs IPIP6 acceleration control is unavailable.
+- Delay the LuCI status refresh until the queued MAP-E restart has started.
+
 ## v0.2.1
 
 - Ship `/etc/config/fleth` and `/etc/config/mape_ppe` directly so the LuCI

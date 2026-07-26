@@ -512,6 +512,17 @@ restart_mape() {
 	wait_mape_ready "$wait_max"
 }
 
+restart_mape_async() {
+	local log="/tmp/mape-ppe-restart.log"
+
+	: > "$log"
+	(
+		sleep 1
+		restart_mape 20
+		echo "MAP-E restart completed"
+	) >>"$log" 2>&1 </dev/null &
+}
+
 wait_mape_ready() {
 	local i dev wan local line
 	local max="${1:-20}"
@@ -542,14 +553,26 @@ enable_ppe() {
 	printf '%s\n' 'qca-nss-ppe-tunipip6' > "$MODFILE_TUNIPIP6"
 	chmod 644 "$MODFILE_TUN" "$MODFILE_TUNIPIP6"
 
-	modprobe qca-nss-ppe-tun 2>/dev/null || insmod /lib/modules/$(uname -r)/qca-nss-ppe-tun.ko 2>/dev/null
-	modprobe qca-nss-ppe-tunipip6 2>/dev/null || insmod /lib/modules/$(uname -r)/qca-nss-ppe-tunipip6.ko 2>/dev/null
-	[ -w "$ACCEL_IPIP6" ] && echo 1 > "$ACCEL_IPIP6"
+	modprobe qca-nss-ppe-tun 2>/dev/null ||
+		insmod /lib/modules/$(uname -r)/qca-nss-ppe-tun.ko 2>/dev/null ||
+		{ echo "Failed to load qca-nss-ppe-tun" >&2; return 1; }
+	modprobe qca-nss-ppe-tunipip6 2>/dev/null ||
+		insmod /lib/modules/$(uname -r)/qca-nss-ppe-tunipip6.ko 2>/dev/null ||
+		{ echo "Failed to load qca-nss-ppe-tunipip6" >&2; return 1; }
+	is_loaded "$MOD_TUN" ||
+		{ echo "qca_nss_ppe_tun is not present in /proc/modules" >&2; return 1; }
+	is_loaded "$MOD_TUNIPIP6" ||
+		{ echo "qca_nss_ppe_tunipip6 is not present in /proc/modules" >&2; return 1; }
+	[ -w "$ACCEL_IPIP6" ] ||
+		{ echo "PPE IPIP6 acceleration control is unavailable" >&2; return 1; }
+	echo 1 > "$ACCEL_IPIP6"
+	accel_ipip6_enabled ||
+		{ echo "PPE IPIP6 acceleration did not enable" >&2; return 1; }
 
 	uci set mape_ppe.global.enabled='1'
 	uci commit mape_ppe
-	restart_mape
-	echo "MAP-E PPE acceleration enabled"
+	restart_mape_async
+	echo "MAP-E PPE acceleration enabled; MAP-E restart queued"
 }
 
 disable_ppe() {
@@ -557,9 +580,11 @@ disable_ppe() {
 	uci set mape_ppe.global.enabled='0'
 	uci commit mape_ppe
 
-	[ -w "$ACCEL_IPIP6" ] && echo 0 > "$ACCEL_IPIP6"
-	restart_mape
-	echo "MAP-E PPE acceleration disabled; qca tunnel modules remain loaded for stable software tunnel fallback"
+	[ -w "$ACCEL_IPIP6" ] ||
+		{ echo "PPE IPIP6 acceleration control is unavailable" >&2; return 1; }
+	echo 0 > "$ACCEL_IPIP6"
+	restart_mape_async
+	echo "MAP-E PPE acceleration disabled; MAP-E restart queued and tunnel modules remain loaded"
 }
 
 case "$1" in
