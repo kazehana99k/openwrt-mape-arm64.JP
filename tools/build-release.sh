@@ -11,7 +11,7 @@
 #
 # Usage:
 #   tools/build-release.sh                 # build tarball only
-#   tools/build-release.sh --upload v0.1.0 # build + upload to GitHub release
+#   tools/build-release.sh --upload v0.2.0 # build + upload to GitHub release
 set -e
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
@@ -49,7 +49,8 @@ if [ "$1" = "--upload" ]; then
     TAG="${2:-$(git describe --tags --abbrev=0)}"
     [ -n "$TAG" ] || { echo "ERR: --upload requires a tag (or one must exist)" >&2; exit 1; }
     echo ""
-    echo "Uploading $TARBALL and install.sh to release $TAG..."
-    gh release upload "$TAG" "$TARBALL" install.sh --clobber
+    echo "Uploading release assets to $TAG..."
+    set -- "$TARBALL" install.sh
+    gh release upload "$TAG" "$@" --clobber
     echo "Done. Visit: https://github.com/kazehana99k/openwrt-mape-arm64.JP/releases/tag/$TAG"
 fi

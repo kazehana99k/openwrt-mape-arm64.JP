@@ -90,6 +90,12 @@ The installer will:
 4. Set executable permissions, apply sysctl tuning, reload rpcd
 5. Print next steps (restart netifd, configure interface)
 
+Qualcomm PPE kernel modules are not bundled with the portable package. Modules
+for Xiaomi BE10000, QWRT 25.12.2, IPQ95xx, Linux 5.4.213, R26.6.16 are
+published in the separate
+[`qwrt-be10000-mape-ppe` repository](https://github.com/kazehana99k/qwrt-be10000-mape-ppe)
+to prevent installation on unrelated firmware.
+
 After installation, run `/etc/init.d/network restart` to register the
 new `mape` protocol with netifd, then configure via LuCI or CLI (see
 below).
@@ -114,6 +120,8 @@ cd openwrt-mape-arm64.JP
 
 # Push package files into / preserving paths
 tar -C package/mape/files -cf - . | ssh root@<router-ip> "cd / && tar -xf -"
+tar -C package/luci-app-fleth/root -cf - . | ssh root@<router-ip> "cd / && tar -xf -"
+tar -C package/luci-app-fleth/htdocs -cf - . | ssh root@<router-ip> "cd /www && tar -xf -"
 
 # Permissions + reload services
 ssh root@<router-ip> '
@@ -131,14 +139,11 @@ ssh root@<router-ip> '
 
 ### Option A — LuCI (recommended)
 
-1. Open **Network → Interfaces → Add new interface**
-2. Name: `mape`, Protocol: `MAP-E (custom)`
-3. Fill the **IPv6 PD prefix** field (e.g. `2404:7a80:0:0::/56`),
-   set **Physical WAN device** to your IPv6 upstream interface
-   (e.g. `eth4`)
-4. **Save & Apply**
-5. Re-edit the interface to see the **Auto-detected parameters**
-   panel (ISP, CE IPv6, IPv4, BR, PSID)
+1. Open **Network → Flet'h Configuration**
+2. Run **Auto Configure tunnel Interface**
+3. Confirm that PD is read from `wan6` and ISP, CE IPv6, mapped IPv4, BR,
+   PSID, and WAN device are populated automatically
+4. Enable **PPE Acceleration** on a supported QWRT firmware
 
 For port forwarding: copy `examples/mape.example` to `/etc/config/mape`
 and edit (must use `src_port` values inside the PSID-allocated range).
@@ -146,27 +151,10 @@ and edit (must use `src_port` values inside the PSID-allocated range).
 ### Option B — CLI / UCI
 
 ```sh
-# 1. Clean QSDK MAP-E orphan fields (if migrating)
-for f in type peeraddr ipaddr ip4prefixlen ip6prefix ip6prefixlen \
-         ealen psidlen offset tunlink; do
-    uci delete network.wan.$f 2>/dev/null
-done
-uci commit network
-
-# 2. Define mape interface
-uci set network.mape=interface
-uci set network.mape.proto=mape
-uci set network.mape.pd_prefix='YOUR_PD_HERE'
-uci set network.mape.wan_dev='eth4'
-uci set network.mape.mtu='1460'
-uci set network.mape.legacy_mssfix='1'
-uci commit network
-
-# Alternative: option tunlink 'wan6' to auto-fetch PD from upstream
-
-# 3. Bring it up
-ifup mape
-sleep 2
+mape-ppe detect                              # read-only auto-detection
+mape-ppe autoconfigure                       # configure WAN6, PD, WAN device and MAP-E
+mape-ppe enable                              # enable PPE only on supported firmware
+mape-ppe state
 ip route show default                          # default dev mape
 ip addr show mape | grep inet                  # IPv4 from MAP-E
 cat /var/run/mape.mape.json                    # parameter snapshot

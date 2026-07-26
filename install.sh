@@ -16,6 +16,8 @@ set -e
 REPO_URL="https://github.com/kazehana99k/openwrt-mape-arm64.JP"
 TARBALL_URL="$REPO_URL/releases/latest/download/openwrt-mape-arm64.tar.gz"
 TMP_TARBALL="/tmp/openwrt-mape-arm64.tar.gz"
+PPE_INSTALLER_URL="https://github.com/kazehana99k/qwrt-be10000-mape-ppe/releases/latest/download/install.sh"
+TMP_PPE_INSTALLER="/tmp/install-mape-ppe-modules.sh"
 
 say() { printf '\033[1;36m>>> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m!!! %s\033[0m\n' "$*"; }
@@ -93,6 +95,26 @@ sysctl -p /etc/sysctl.d/99-mape.conf >/dev/null
 say "Reloading rpcd (so LuCI can read /var/run/mape.*.json)..."
 /etc/init.d/rpcd reload
 
+# 7. Install optional kernel-specific PPE modules only when the dedicated
+# installer confirms an exact board, firmware, architecture, and kernel match.
+if [ ! -f "/lib/modules/$(uname -r)/qca-nss-ppe-tun.ko" ] ||
+   [ ! -f "/lib/modules/$(uname -r)/qca-nss-ppe-tunipip6.ko" ]; then
+    say "Checking for a compatible Qualcomm PPE module bundle..."
+    rm -f "$TMP_PPE_INSTALLER"
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL -o "$TMP_PPE_INSTALLER" "$PPE_INSTALLER_URL" || true
+    else
+        wget -qO "$TMP_PPE_INSTALLER" "$PPE_INSTALLER_URL" || true
+    fi
+    if [ -s "$TMP_PPE_INSTALLER" ]; then
+        sh "$TMP_PPE_INSTALLER" ||
+            warn "No compatible release-provided PPE modules were installed; software MAP-E remains available."
+    else
+        warn "PPE module installer is unavailable; software MAP-E remains available."
+    fi
+    rm -f "$TMP_PPE_INSTALLER"
+fi
+
 cat <<'EOF'
 
 ====================================
@@ -105,26 +127,20 @@ NEXT STEPS:
      /etc/init.d/network restart
      (this briefly drops all interfaces — your ssh on LAN is unaffected)
 
-  2. Configure via LuCI:
-     Network -> Interfaces -> Add new interface
-       Name:     mape
-       Protocol: MAP-E (custom)
-       Fill IPv6 PD prefix, set WAN device (e.g. eth4), Save & Apply
+  2. Auto-detect WAN6, PD, ISP, MAP-E IPv4, BR and PSID:
+     mape-ppe detect
 
-     Or use the Flet'h helper:
+  3. Apply the detected configuration and enable PPE when supported:
+     mape-ppe autoconfigure
+     mape-ppe enable
+
+     The same actions are available in:
        Network -> Flet'h Configuration
-       Auto Configure tunnel Interface + PPE Acceleration
-
-  3. Or via CLI:
-     uci set network.mape=interface
-     uci set network.mape.proto=mape
-     uci set network.mape.pd_prefix='YOUR_PD_HERE/56'
-     uci set network.mape.wan_dev='eth4'
-     uci commit network && ifup mape
 
   4. Verify:
-     cat /var/run/mape.mape.json     # parameter snapshot
-     ping -c 3 -I mape 1.1.1.1       # connectivity check
+     mape-ppe state
+     cat /var/run/mape.mape.json
+     ping -c 3 -I mape 1.1.1.1
 
   Full docs: https://github.com/kazehana99k/openwrt-mape-arm64.JP
 

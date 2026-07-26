@@ -83,6 +83,12 @@ wget -O - https://github.com/kazehana99k/openwrt-mape-arm64.JP/releases/latest/d
 4. 実行権限を設定、sysctl チューニングを適用、rpcd を再読込
 5. 次のステップを表示（netifd を再起動、インターフェースを設定）
 
+Qualcomm PPE 用カーネルモジュールは通用パッケージには含まれません。
+Xiaomi BE10000 / QWRT 25.12.2 / IPQ95xx / Linux 5.4.213 /
+R26.6.16 専用モジュールは、誤インストールを防ぐため
+[独立した `qwrt-be10000-mape-ppe` リポジトリ](https://github.com/kazehana99k/qwrt-be10000-mape-ppe)
+で配布します。
+
 インストール完了後、`/etc/init.d/network restart` で `mape` プロトコルを
 netifd に登録してから、LuCI または CLI で設定してください（下記参照）。
 
@@ -106,6 +112,8 @@ cd openwrt-mape-arm64.JP
 
 # tar パイプでパッケージファイルを / にプッシュ（パス構造を保持）
 tar -C package/mape/files -cf - . | ssh root@<ルーターIP> "cd / && tar -xf -"
+tar -C package/luci-app-fleth/root -cf - . | ssh root@<ルーターIP> "cd / && tar -xf -"
+tar -C package/luci-app-fleth/htdocs -cf - . | ssh root@<ルーターIP> "cd /www && tar -xf -"
 
 # 権限設定 + サービス再読込
 ssh root@<ルーターIP> '
@@ -123,14 +131,11 @@ ssh root@<ルーターIP> '
 
 ### 方法 A —— LuCI（推奨）
 
-1. **ネットワーク → インターフェース → 新しいインターフェースを追加**
-2. 名前：`mape`、プロトコル：`MAP-E (custom)`
-3. **IPv6 PD prefix** 欄に PD を入力（例：`2404:7a80:0:0::/56`）、
-   **Physical WAN device** に IPv6 上流インターフェース(例：`eth4`)
-   を入力
-4. **保存して適用**
-5. インターフェースを再度編集すると **自動検出されたパラメーター**
-   パネルで ISP / CE IPv6 / IPv4 / BR / PSID が確認できます
+1. **ネットワーク → Flet'h Configuration**
+2. **Auto Configure tunnel Interface** を実行
+3. `wan6` から PD を取得し、ISP / CE IPv6 / IPv4 / BR / PSID と WAN
+   device が自動設定されたことを確認
+4. 対応する QWRT 環境では **PPE Acceleration** を有効化
 
 ポートフォワード設定：`examples/mape.example` を `/etc/config/mape` に
 コピーして編集してください（src_port は必ず PSID 割当範囲内の値に）。
@@ -138,27 +143,10 @@ ssh root@<ルーターIP> '
 ### 方法 B —— CLI / UCI
 
 ```sh
-# 1. QSDK MAP-E の残骸フィールドを削除（旧設定からの移行時）
-for f in type peeraddr ipaddr ip4prefixlen ip6prefix ip6prefixlen \
-         ealen psidlen offset tunlink; do
-    uci delete network.wan.$f 2>/dev/null
-done
-uci commit network
-
-# 2. mape インターフェースを定義
-uci set network.mape=interface
-uci set network.mape.proto=mape
-uci set network.mape.pd_prefix='あなたの PD'
-uci set network.mape.wan_dev='eth4'
-uci set network.mape.mtu='1460'
-uci set network.mape.legacy_mssfix='1'
-uci commit network
-
-# 別案：option tunlink 'wan6'  上流インターフェースから PD を自動取得
-
-# 3. 起動
-ifup mape
-sleep 2
+mape-ppe detect                              # 読み取り専用の自動検出
+mape-ppe autoconfigure                       # wan6/PD/WAN device/MAP-E を設定
+mape-ppe enable                              # 対応環境のみ PPE を有効化
+mape-ppe state
 ip route show default                          # default dev mape
 ip addr show mape | grep inet                  # MAP-E 割当の IPv4
 cat /var/run/mape.mape.json                    # パラメータースナップショット

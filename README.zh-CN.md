@@ -76,6 +76,11 @@ wget -O - https://github.com/kazehana99k/openwrt-mape-arm64.JP/releases/latest/d
 4. 设置可执行权限、应用 sysctl、reload rpcd
 5. 打印下一步操作（重启 netifd、配置接口）
 
+Qualcomm PPE 内核模块不包含在通用安装包中。Xiaomi BE10000、QWRT
+25.12.2、IPQ95xx、Linux 5.4.213、R26.6.16 专用模块通过
+[独立的 `qwrt-be10000-mape-ppe` 仓库](https://github.com/kazehana99k/qwrt-be10000-mape-ppe)
+发布，避免误装到其他固件。
+
 安装完成后跑 `/etc/init.d/network restart` 让 netifd 注册 `mape` 协议，
 然后用 LuCI 或 CLI 配置（看下面）。
 
@@ -99,6 +104,8 @@ cd openwrt-mape-arm64.JP
 
 # 把 package 文件 tar 管道推到路由器（保留路径结构）
 tar -C package/mape/files -cf - . | ssh root@<路由器ip> "cd / && tar -xf -"
+tar -C package/luci-app-fleth/root -cf - . | ssh root@<路由器ip> "cd / && tar -xf -"
+tar -C package/luci-app-fleth/htdocs -cf - . | ssh root@<路由器ip> "cd /www && tar -xf -"
 
 # 设置权限 + 加载服务
 ssh root@<路由器ip> '
@@ -116,13 +123,11 @@ ssh root@<路由器ip> '
 
 ### 方式 A —— LuCI 网页（推荐）
 
-1. 打开 **网络 → 接口 → 添加新接口**
-2. 名称：`mape`，协议：`MAP-E (custom)`
-3. 填 **IPv6 PD 前缀**（例如 `2404:7a80:0:0::/56`），**Physical WAN
-   device** 填你的 IPv6 上联接口（例如 `eth4`）
-4. **保存并应用**
-5. 重新编辑接口可以看到 **自动检测到的参数** 面板（ISP / CE IPv6 /
-   IPv4 / BR / PSID）
+1. 打开 **网络 → Flet'h Configuration**
+2. 点击 **Auto Configure tunnel Interface**
+3. 确认系统从 `wan6` 自动获取 PD，并自动填入 ISP、CE IPv6、公网 IPv4、
+   BR、PSID 和 WAN device
+4. 在受支持的 QWRT 固件上打开 **PPE Acceleration**
 
 端口转发：把 `examples/mape.example` 复制到 `/etc/config/mape` 后编辑
 （src_port 必须在 PSID 段内）。
@@ -130,27 +135,10 @@ ssh root@<路由器ip> '
 ### 方式 B —— CLI / UCI
 
 ```sh
-# 1. 清掉 QSDK MAP-E 死字段（如果是从老配置迁移）
-for f in type peeraddr ipaddr ip4prefixlen ip6prefix ip6prefixlen \
-         ealen psidlen offset tunlink; do
-    uci delete network.wan.$f 2>/dev/null
-done
-uci commit network
-
-# 2. 定义 mape 接口
-uci set network.mape=interface
-uci set network.mape.proto=mape
-uci set network.mape.pd_prefix='你的 PD'
-uci set network.mape.wan_dev='eth4'
-uci set network.mape.mtu='1460'
-uci set network.mape.legacy_mssfix='1'
-uci commit network
-
-# 备选：option tunlink 'wan6'  从上联接口自动取 PD
-
-# 3. 启动
-ifup mape
-sleep 2
+mape-ppe detect                              # 只读自动检测
+mape-ppe autoconfigure                       # 自动配置 wan6、PD、WAN device 和 MAP-E
+mape-ppe enable                              # 仅受支持固件启用 PPE
+mape-ppe state
 ip route show default                          # default dev mape
 ip addr show mape | grep inet                  # 看到 MAP-E 分配的 IPv4
 cat /var/run/mape.mape.json                    # 参数快照
