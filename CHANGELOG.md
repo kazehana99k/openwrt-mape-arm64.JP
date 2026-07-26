@@ -1,5 +1,10 @@
 # Changelog
 
+## v0.2.1
+
+- Ship `/etc/config/fleth` and `/etc/config/mape_ppe` directly so the LuCI
+  page cannot fail with `uci/get` ubus code 4 when `uci-defaults` has not run.
+
 ## v0.2.0
 
 - Add Flet'h-based automatic WAN6/PD discovery and MAP-E configuration.

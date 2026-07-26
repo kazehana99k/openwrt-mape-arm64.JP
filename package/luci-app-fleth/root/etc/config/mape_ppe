@@ -1,0 +1,2 @@
+config mape_ppe 'global'
+	option enabled '1'

@@ -1,0 +1,8 @@
+config fleth 'global'
+	option enabled '1'
+	option interface 'mape'
+	option interface6 'wan6'
+	option interface_zone 'wan'
+	option mtu '1460'
+	option prefer_slaac '1'
+	option tunnel_activation '1'
